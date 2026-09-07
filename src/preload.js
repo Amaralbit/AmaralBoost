@@ -1,0 +1,23 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('amaralBoost', {
+  getAppVersion: () => ipcRenderer.invoke('app:get-version'),
+  getSystemInfo: () => ipcRenderer.invoke('system:get-info'),
+  getPerformanceSpecs: () => ipcRenderer.invoke('performance:get-specs'),
+  getPerformanceLive: () => ipcRenderer.invoke('performance:get-live'),
+  getProfileState: () => ipcRenderer.invoke('profiles:get-state'),
+  applyProfile: profile => ipcRenderer.invoke('profiles:apply', profile),
+  getHistory: () => ipcRenderer.invoke('history:get'),
+  clearHistory: () => ipcRenderer.invoke('history:clear'),
+  exportDiagnostics: () => ipcRenderer.invoke('diagnostics:export'),
+  getTweaksCatalog: () => ipcRenderer.invoke('tweaks:get-catalog'),
+  getTweaksState: () => ipcRenderer.invoke('tweaks:get-state'),
+  applyTweak: id => ipcRenderer.invoke('tweaks:apply', id),
+  revertTweak: id => ipcRenderer.invoke('tweaks:revert', id),
+  runCleanup: id => ipcRenderer.invoke('tweaks:run-cleanup', id),
+  getRamLimitState: () => ipcRenderer.invoke('ram:get-state'),
+  enableRamLimit: limitMB => ipcRenderer.invoke('ram:enable', limitMB),
+  disableRamLimit: () => ipcRenderer.invoke('ram:disable'),
+  checkForUpdates: () => ipcRenderer.invoke('updates:check'),
+  openExternal: url => ipcRenderer.invoke('app:open-external', url)
+});

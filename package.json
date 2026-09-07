@@ -1,0 +1,44 @@
+{
+  "name": "amaral-boost",
+  "version": "0.2.1",
+  "description": "Painel local e reversível para organizar ajustes de desempenho do Windows.",
+  "main": "src/main.js",
+  "author": "Amaral Boost",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "^40.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.amaralboost.app",
+    "productName": "Amaral Boost",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "requestedExecutionLevel": "requireAdministrator"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Amaral Boost"
+    }
+  }
+}
