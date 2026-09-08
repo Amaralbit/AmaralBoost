@@ -88,6 +88,13 @@
 .ram-limit-range-hint{margin:8px 0 0}
 .ram-limit-actions{display:flex;justify-content:flex-end}
 
+/* Revisão de perfil: perfis com pacotes maiores (ex.: Gamer) rendem uma lista
+   mais alta que a tela — sem isso o card crescia livre e o botão "Aplicar
+   perfil" ficava fora da área visível, sem como rolar até ele. */
+.modal{display:flex;flex-direction:column;max-height:calc(100vh - 40px)}
+.review-list{overflow-y:auto;min-height:0;padding-right:4px}
+.modal-actions{flex-shrink:0}
+
 /* Atualizações */
 .updates-card{padding:22px;display:flex;flex-direction:column;gap:16px;margin-top:14px;max-width:640px}
 .updates-versions{display:flex;align-items:center;gap:28px}
