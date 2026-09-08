@@ -148,6 +148,17 @@ const TWEAKS = [
     ]
   },
   {
+    id: 'gamer-power-mode-max',
+    name: 'Modo de Energia: desempenho máximo na tomada',
+    desc: 'Ajusta o "Modo de Energia" do Windows (Configurações > Energia e bateria) para Desempenho Máximo enquanto o notebook está na tomada, sem mexer no modo usado na bateria.',
+    notWhen: 'você prefere escolher manualmente o "Modo de Energia" em Configurações do Windows.',
+    tags: ['gaming', 'desempenho'],
+    admin: true,
+    regOps: [
+      { hive: 'HKLM', key: 'SYSTEM\\CurrentControlSet\\Control\\Power\\User\\PowerSchemes', name: 'ActiveOverlayAcPowerScheme', type: 'String', value: 'ded574b5-45a0-4f42-8737-46345c09c238' }
+    ]
+  },
+  {
     id: 'battery-power-mode-eco',
     name: 'Modo de Energia: economia na bateria',
     desc: 'Ajusta o "Modo de Energia" do Windows (Configurações > Energia e bateria) para Economia de energia sempre que o notebook estiver na bateria, sem mexer no modo usado conectado na tomada.',
@@ -208,7 +219,7 @@ const CLEANUPS = [
  * pontual, de efeito conhecido e 100% revertível pelo Padrão Windows.
  */
 const GAMER_BUNDLE = {
-  tweaks: ['game-dvr-off', 'sticky-keys-off', 'network-throttling-off', 'games-priority', 'system-responsiveness', 'background-apps-off', 'edge-preload-off', 'visual-effects-performance'],
+  tweaks: ['game-dvr-off', 'sticky-keys-off', 'network-throttling-off', 'games-priority', 'system-responsiveness', 'background-apps-off', 'edge-preload-off', 'visual-effects-performance', 'gamer-power-mode-max'],
   cleanups: ['standby-list']
 };
 

@@ -19,6 +19,9 @@ const POWER_SAVER_PLAN_GUID = 'a1841308-3541-4fab-bc81-f71556f20b4a';
 // clássico acima). Usado só para aplicar o ajuste 'battery-power-mode-eco' na
 // hora, sem esperar a próxima desconexão da tomada — ver applyBatteryOverlayNow.
 const OVERLAY_BETTER_BATTERY_GUID = '961cc777-2547-4f9d-8174-7d86181b8a7a';
+// Mesmo overlay, lado oposto: usado pelo perfil Gamer para forçar Desempenho
+// Máximo enquanto o notebook está na tomada (ver applyGamerOverlayNow).
+const OVERLAY_MAX_PERFORMANCE_GUID = 'ded574b5-45a0-4f42-8737-46345c09c238';
 const PROFILE_NAMES = ['Equilibrado', 'Gamer', 'Economia de Bateria', 'Padrão Windows'];
 const PROFILE_POWER_PLANS = {
   Equilibrado: { guid: BALANCED_PLAN_GUID, label: 'Equilibrado' },
@@ -598,12 +601,13 @@ async function activatePowerPlan(guid, label) {
   }
 }
 
-// O ajuste 'battery-power-mode-eco' só grava a chave de registro que o Windows
-// consulta na próxima troca de fonte de energia (plugar/desplugar). Se a pessoa
-// já está na bateria no momento de aplicar o perfil, isso sozinho não muda nada
-// na tela até desconectar e reconectar — então, além de gravar a chave, chamamos
-// a mesma função que o app Configurações usa (PowerSetActiveOverlayScheme, de
-// powrprof.dll) pra refletir a troca imediatamente quando fizer sentido.
+// Os ajustes 'battery-power-mode-eco' e 'gamer-power-mode-max' só gravam a
+// chave de registro que o Windows consulta na próxima troca de fonte de
+// energia (plugar/desplugar). Se a pessoa já está na fonte certa no momento
+// de aplicar o perfil, isso sozinho não muda nada na tela até trocar de
+// fonte — então, além de gravar a chave, chamamos a mesma função que o app
+// Configurações usa (PowerSetActiveOverlayScheme, de powrprof.dll) pra
+// refletir a troca imediatamente quando fizer sentido.
 async function readPowerSource() {
   const script = `
     $b = Get-CimInstance -Namespace root\\wmi -ClassName BatteryStatus -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -625,19 +629,37 @@ async function setActiveOverlaySchemeNow(guid) {
   return out.trim() === '0';
 }
 
-async function applyBatteryOverlayNow() {
+// `acceptedSources` é a lista de valores de readPowerSource() que contam como
+// "aplicar agora". Um desktop sem bateria nunca reporta 'bateria', então o
+// lado tomada aceita também 'sem-bateria' — nesses PCs a máquina está sempre,
+// na prática, na fonte de energia.
+async function applyOverlaySchemeIfOnSource(acceptedSources, guid, messages) {
   const source = await readPowerSource();
-  if (source !== 'bateria') {
-    return { setting: 'Modo de Energia (Windows)', status: 'unchanged', message: 'Definido para a próxima vez que o notebook estiver na bateria (agora está na tomada).' };
+  if (!acceptedSources.includes(source)) {
+    return { setting: 'Modo de Energia (Windows)', status: 'unchanged', message: messages.pending };
   }
   try {
-    const confirmed = await setActiveOverlaySchemeNow(OVERLAY_BETTER_BATTERY_GUID);
+    const confirmed = await setActiveOverlaySchemeNow(guid);
     return confirmed
-      ? { setting: 'Modo de Energia (Windows)', status: 'success', message: 'Trocado agora para Economia de energia, porque o notebook está na bateria.' }
+      ? { setting: 'Modo de Energia (Windows)', status: 'success', message: messages.applied }
       : { setting: 'Modo de Energia (Windows)', status: 'failed', message: 'O Windows não confirmou a troca imediata do Modo de Energia.' };
   } catch {
     return { setting: 'Modo de Energia (Windows)', status: 'failed', message: 'Não foi possível trocar o Modo de Energia agora.' };
   }
+}
+
+function applyBatteryOverlayNow() {
+  return applyOverlaySchemeIfOnSource(['bateria'], OVERLAY_BETTER_BATTERY_GUID, {
+    applied: 'Trocado agora para Economia de energia, porque o notebook está na bateria.',
+    pending: 'Definido para a próxima vez que o notebook estiver na bateria (agora está na tomada).'
+  });
+}
+
+function applyGamerOverlayNow() {
+  return applyOverlaySchemeIfOnSource(['tomada', 'sem-bateria'], OVERLAY_MAX_PERFORMANCE_GUID, {
+    applied: 'Trocado agora para Desempenho Máximo.',
+    pending: 'Definido para a próxima vez que estiver na tomada (agora está na bateria).'
+  });
 }
 
 async function readGameMode() {
@@ -741,6 +763,7 @@ async function applyProfile(profile) {
   // "failed" na lista, sem impedir os demais — igual ao plano de energia hoje.
   for (const id of GAMER_BUNDLE.tweaks) results.push(await applyTweakForResult(id));
   for (const id of GAMER_BUNDLE.cleanups) results.push(await runCleanupForResult(id));
+  results.push(await applyGamerOverlayNow());
   return finalizeApplyResult(profile, results);
 }
 
