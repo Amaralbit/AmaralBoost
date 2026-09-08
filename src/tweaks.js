@@ -146,6 +146,17 @@ const TWEAKS = [
     regOps: [
       { hive: 'HKCU', key: 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VisualEffects', name: 'VisualFXSetting', type: 'DWord', value: 2 }
     ]
+  },
+  {
+    id: 'battery-power-mode-eco',
+    name: 'Modo de Energia: economia na bateria',
+    desc: 'Ajusta o "Modo de Energia" do Windows (Configurações > Energia e bateria) para Economia de energia sempre que o notebook estiver na bateria, sem mexer no modo usado conectado na tomada.',
+    notWhen: 'você prefere escolher manualmente o "Modo de Energia" em Configurações do Windows.',
+    tags: ['bateria', 'desempenho'],
+    admin: true,
+    regOps: [
+      { hive: 'HKLM', key: 'SYSTEM\\CurrentControlSet\\Control\\Power\\User\\PowerSchemes', name: 'ActiveOverlayDcPowerScheme', type: 'String', value: '961cc777-2547-4f9d-8174-7d86181b8a7a' }
+    ]
   }
 ];
 
@@ -209,7 +220,7 @@ const GAMER_BUNDLE = {
  * ajustes individuais e é 100% revertível pelo Padrão Windows.
  */
 const BATTERY_BUNDLE = {
-  tweaks: ['background-apps-off', 'edge-preload-off', 'visual-effects-performance', 'notifications-off'],
+  tweaks: ['background-apps-off', 'edge-preload-off', 'visual-effects-performance', 'notifications-off', 'battery-power-mode-eco'],
   cleanups: []
 };
 

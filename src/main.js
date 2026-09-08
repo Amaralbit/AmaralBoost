@@ -14,6 +14,11 @@ const REG_ABSENT = '__AMARAL_ABSENT__';
 const BALANCED_PLAN_GUID = '381b4222-f694-41f0-9685-ff5bb260df2e';
 const HIGH_PERFORMANCE_PLAN_GUID = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c';
 const POWER_SAVER_PLAN_GUID = 'a1841308-3541-4fab-bc81-f71556f20b4a';
+// GUID do overlay "Economia de energia" do Modo de Energia do Windows 11 (o
+// seletor de Configurações > Energia e bateria, separado do plano de energia
+// clássico acima). Usado só para aplicar o ajuste 'battery-power-mode-eco' na
+// hora, sem esperar a próxima desconexão da tomada — ver applyBatteryOverlayNow.
+const OVERLAY_BETTER_BATTERY_GUID = '961cc777-2547-4f9d-8174-7d86181b8a7a';
 const PROFILE_NAMES = ['Equilibrado', 'Gamer', 'Economia de Bateria', 'Padrão Windows'];
 const PROFILE_POWER_PLANS = {
   Equilibrado: { guid: BALANCED_PLAN_GUID, label: 'Equilibrado' },
@@ -593,6 +598,48 @@ async function activatePowerPlan(guid, label) {
   }
 }
 
+// O ajuste 'battery-power-mode-eco' só grava a chave de registro que o Windows
+// consulta na próxima troca de fonte de energia (plugar/desplugar). Se a pessoa
+// já está na bateria no momento de aplicar o perfil, isso sozinho não muda nada
+// na tela até desconectar e reconectar — então, além de gravar a chave, chamamos
+// a mesma função que o app Configurações usa (PowerSetActiveOverlayScheme, de
+// powrprof.dll) pra refletir a troca imediatamente quando fizer sentido.
+async function readPowerSource() {
+  const script = `
+    $b = Get-CimInstance -Namespace root\\wmi -ClassName BatteryStatus -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $b) { Write-Output 'sem-bateria' } elseif ($b.PowerOnline) { Write-Output 'tomada' } else { Write-Output 'bateria' }
+  `;
+  try {
+    return (await runPowerShellScript(script, 5000)).trim();
+  } catch {
+    return 'desconhecido';
+  }
+}
+
+async function setActiveOverlaySchemeNow(guid) {
+  const script = `
+    Add-Type -Name Overlay -Namespace AmaralBoost -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid overlayGuid);'
+    Write-Output ([AmaralBoost.Overlay]::PowerSetActiveOverlayScheme([Guid]'${guid}'))
+  `;
+  const out = await runPowerShellScript(script, 8000);
+  return out.trim() === '0';
+}
+
+async function applyBatteryOverlayNow() {
+  const source = await readPowerSource();
+  if (source !== 'bateria') {
+    return { setting: 'Modo de Energia (Windows)', status: 'unchanged', message: 'Definido para a próxima vez que o notebook estiver na bateria (agora está na tomada).' };
+  }
+  try {
+    const confirmed = await setActiveOverlaySchemeNow(OVERLAY_BETTER_BATTERY_GUID);
+    return confirmed
+      ? { setting: 'Modo de Energia (Windows)', status: 'success', message: 'Trocado agora para Economia de energia, porque o notebook está na bateria.' }
+      : { setting: 'Modo de Energia (Windows)', status: 'failed', message: 'O Windows não confirmou a troca imediata do Modo de Energia.' };
+  } catch {
+    return { setting: 'Modo de Energia (Windows)', status: 'failed', message: 'Não foi possível trocar o Modo de Energia agora.' };
+  }
+}
+
 async function readGameMode() {
   const script = [
     `$item = Get-ItemProperty -Path '${GAME_MODE_PATH}' -ErrorAction SilentlyContinue`,
@@ -683,6 +730,7 @@ async function applyProfile(profile) {
     const results = [power, gameMode];
     for (const id of BATTERY_BUNDLE.tweaks) results.push(await applyTweakForResult(id));
     for (const id of BATTERY_BUNDLE.cleanups) results.push(await runCleanupForResult(id));
+    results.push(await applyBatteryOverlayNow());
     return finalizeApplyResult(profile, results);
   }
 
