@@ -35,7 +35,7 @@ function showToast(message) { toast.textContent = message; toast.classList.add('
 function switchView(view) {
   document.querySelectorAll('.view').forEach(element => element.classList.toggle('active-view', element.id === view));
   document.querySelectorAll('.nav-item').forEach(element => element.classList.toggle('active', element.dataset.view === view));
-  document.querySelector('#page-title').textContent = { dashboard: 'Visão geral', performance: 'Desempenho', profiles: 'Perfis', ram: 'Gerenciamento de RAM', history: 'Atividade', updates: 'Atualizações', donate: 'Doação', settings: 'Preferências' }[view];
+  document.querySelector('#page-title').textContent = { dashboard: 'Visão geral', performance: 'Desempenho', profiles: 'Perfis', cleanups: 'Limpeza', ram: 'Gerenciamento de RAM', history: 'Atividade', updates: 'Atualizações', donate: 'Doação', settings: 'Preferências' }[view];
   if (view === 'performance') startPerformancePolling(); else stopPerformancePolling();
   if (view === 'ram') startRamPolling(); else stopRamPolling();
   // A checagem em si já roda sozinha ao abrir o app (ver bootstrap no fim do
