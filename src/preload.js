@@ -19,5 +19,6 @@ contextBridge.exposeInMainWorld('amaralBoost', {
   enableRamLimit: limitMB => ipcRenderer.invoke('ram:enable', limitMB),
   disableRamLimit: () => ipcRenderer.invoke('ram:disable'),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
-  openExternal: url => ipcRenderer.invoke('app:open-external', url)
+  openExternal: url => ipcRenderer.invoke('app:open-external', url),
+  copyText: text => ipcRenderer.invoke('app:copy-text', text)
 });

@@ -1,9 +1,9 @@
-const { app, BrowserWindow, Tray, Menu, dialog, nativeImage, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, dialog, nativeImage, ipcMain, shell, clipboard } = require('electron');
 const path = require('node:path');
 const os = require('node:os');
 const https = require('node:https');
 const fs = require('node:fs/promises');
-const { execFile, execFileSync } = require('node:child_process');
+const { execFile, execFileSync, spawn } = require('node:child_process');
 const { promisify } = require('node:util');
 const { randomUUID } = require('node:crypto');
 const { TWEAKS, CLEANUPS, GAMER_BUNDLE, BATTERY_BUNDLE } = require('./tweaks');
@@ -213,7 +213,7 @@ async function readGpuDiskNetworkLive() {
     [pscustomobject]@{ gpuPercent = $gpuPercent; vramBytes = $vramBytes; diskPercent = $diskPercent; netDownBytesPerSec = $netDownBytes; netUpBytesPerSec = $netUpBytes } | ConvertTo-Json -Compress
   `;
   try {
-    const stdout = await runPowerShellScript(script, 8000);
+    const stdout = await runInPerfShell(script, 8000);
     const parsed = JSON.parse(stdout || '{}');
     return {
       gpuPercent: clampPercent(parsed.gpuPercent),
@@ -380,6 +380,93 @@ async function runPowerShellScript(script, timeout = 15000) {
   return stdout.trim();
 }
 
+// ---------- PowerShell "vivo" para o monitor de Desempenho ----------
+// Cada leitura de GPU/disco/rede via runPowerShellScript abria um powershell.exe
+// novo — a inicialização do processo (centenas de ms) mais as consultas CIM
+// somavam quase todo o "delay" que o usuário via, além do intervalo fixo entre
+// leituras. Aqui um único processo fica de pé, lendo comandos da própria
+// entrada padrão (a mesma técnica de "shell persistente" via stdin) enquanto o
+// monitor está aberto; cada leitura só manda o script e espera um marcador
+// exclusivo aparecer na saída, sem pagar o custo de abrir o PowerShell de novo.
+// Fica ocioso e se encerra sozinho pouco depois de o usuário sair da tela de
+// Desempenho (ver PERF_SHELL_IDLE_MS), e também é encerrado ao fechar o app.
+const PERF_SHELL_IDLE_MS = 20000;
+let perfShellProcess = null;
+let perfShellBuffer = '';
+let perfShellQueue = Promise.resolve();
+let perfShellIdleTimer = null;
+
+function killPerfShell() {
+  clearTimeout(perfShellIdleTimer);
+  perfShellIdleTimer = null;
+  if (perfShellProcess) { try { perfShellProcess.kill(); } catch { /* já pode ter saído */ } }
+  perfShellProcess = null;
+  perfShellBuffer = '';
+}
+
+function armPerfShellIdleTimer() {
+  clearTimeout(perfShellIdleTimer);
+  perfShellIdleTimer = setTimeout(killPerfShell, PERF_SHELL_IDLE_MS);
+}
+
+async function ensurePerfShell() {
+  if (perfShellProcess) return perfShellProcess;
+  const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '-'], { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+  perfShellProcess = child;
+  perfShellBuffer = '';
+  child.on('exit', () => { if (perfShellProcess === child) { perfShellProcess = null; perfShellBuffer = ''; } });
+  child.on('error', () => { if (perfShellProcess === child) { perfShellProcess = null; perfShellBuffer = ''; } });
+  child.stdin.write("try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}\r\n");
+  // Descarta qualquer banner/aviso que o PowerShell escreva ao iniciar, pra ele
+  // nunca se misturar com a saída da primeira leitura de verdade.
+  await perfShellRunRaw(child, "Write-Output 'AMARAL-PERF-READY'", 'AMARAL-PERF-READY', 5000).catch(() => {});
+  return child;
+}
+
+function perfShellRunRaw(child, script, marker, timeout) {
+  return new Promise((resolve, reject) => {
+    const markerLine = `__AMARAL_PERF_${marker}__`;
+    let settled = false;
+    const onData = chunk => {
+      perfShellBuffer += chunk.toString('utf8');
+      const idx = perfShellBuffer.indexOf(markerLine);
+      if (idx === -1) return;
+      const output = perfShellBuffer.slice(0, idx);
+      perfShellBuffer = perfShellBuffer.slice(idx + markerLine.length);
+      finish(null, output.trim());
+    };
+    const timer = setTimeout(() => finish(new Error('timeout')), timeout);
+    function finish(err, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdout.off('data', onData);
+      if (err) reject(err); else resolve(value);
+    }
+    child.stdout.on('data', onData);
+    try { child.stdin.write(script + `\r\nWrite-Output '${markerLine}'\r\n`); }
+    catch (err) { finish(err); }
+  });
+}
+
+async function runInPerfShell(script, timeout = 8000) {
+  const run = async () => {
+    const child = await ensurePerfShell();
+    try {
+      const result = await perfShellRunRaw(child, script, randomUUID().replace(/-/g, ''), timeout);
+      armPerfShellIdleTimer();
+      return result;
+    } catch (err) {
+      killPerfShell();
+      throw err;
+    }
+  };
+  const resultPromise = perfShellQueue.then(run, run);
+  // desacopla erros desta chamada da fila (senão uma falha travaria as próximas)
+  perfShellQueue = resultPromise.then(() => {}, () => {});
+  return resultPromise;
+}
+
 async function regGet(hive, key, name) {
   const p = psQuote(regPsPath(hive, key));
   const n = psQuote(name);
@@ -541,12 +628,32 @@ async function disableRamLimit() {
   return { ...result, historyEntry, state: await ramLimit.getState().catch(() => null) };
 }
 
+// Algumas limpezas (ex.: clean-temp) devolvem um JSON com contagem real de
+// itens removidos/mantidos em vez de uma mensagem fixa — só assim dá pra
+// distinguir "limpou tudo" de "nada pôde ser removido" na hora.
+const CLEANUP_RESULT_FORMATTERS = {
+  'clean-temp': stdout => {
+    const parsed = JSON.parse(stdout || '{}');
+    const removed = Number(parsed.removed) || 0;
+    const failed = Number(parsed.failed) || 0;
+    const freedMB = Number(parsed.freedMB) || 0;
+    if (removed === 0 && failed === 0) return 'Não havia arquivos temporários para remover.';
+    const freedText = freedMB > 0 ? ` (~${freedMB} MB liberados)` : '';
+    return failed > 0
+      ? `${removed} itens removidos${freedText}; ${failed} continuavam em uso e foram mantidos.`
+      : `${removed} itens removidos${freedText}.`;
+  }
+};
+
 async function runCleanupById(id) {
   const cleanup = findCleanup(id);
   let result;
   try {
-    await runPowerShellScript(cleanup.cmd, 60000);
-    result = { ok: true, message: cleanup.successMessage || 'Executado.' };
+    const stdout = await runPowerShellScript(cleanup.cmd, 60000);
+    let message = cleanup.successMessage || 'Executado.';
+    const formatter = CLEANUP_RESULT_FORMATTERS[id];
+    if (formatter) { try { message = formatter(stdout); } catch { /* mantém a mensagem padrão */ } }
+    result = { ok: true, message };
   } catch {
     result = { ok: false, message: 'Não foi possível executar esta limpeza.' };
   }
@@ -973,6 +1080,7 @@ app.whenReady().then(() => {
   ipcMain.handle('ram:disable', () => disableRamLimit());
   ipcMain.handle('updates:check', () => checkForUpdates());
   ipcMain.handle('app:open-external', (_event, url) => openExternalLink(url));
+  ipcMain.handle('app:copy-text', (_event, text) => { clipboard.writeText(String(text ?? '')); return { copied: true }; });
   createWindow();
   createTray();
   app.on('activate', () => {
@@ -980,4 +1088,4 @@ app.whenReady().then(() => {
   });
 });
 
-app.on('before-quit', () => { isQuitting = true; });
+app.on('before-quit', () => { isQuitting = true; killPerfShell(); });

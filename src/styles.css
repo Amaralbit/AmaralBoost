@@ -69,6 +69,10 @@
 .empty-activity>span svg,.timeline-empty>span svg{width:22px;height:22px;display:inline-block;vertical-align:middle}
 .reversible-note>span svg{width:20px;height:20px;display:inline-block;vertical-align:middle}
 .primary-button.small{padding:8px 14px;font-size:12px;margin:0;box-shadow:none}
+.secondary-button.small{padding:8px 14px;font-size:12px}
+
+/* Bolinha de aviso no menu (ex.: atualização disponível) */
+.nav-dot{width:7px;height:7px;border-radius:50%;background:#ff5c5c;box-shadow:0 0 0 3px #3a1414;margin-left:auto;flex-shrink:0}
 
 /* Gerenciamento de RAM */
 .ram-total-readout{font-size:26px;font-weight:700;letter-spacing:-.5px;margin:16px 0 6px}
@@ -101,3 +105,15 @@
 .updates-version-block strong{font-size:20px;letter-spacing:-.4px}
 .updates-notes{margin:0;padding:14px 16px;border-radius:10px;background:#0e161e;border:1px solid #223140;color:#a8bfcc;font:12px/1.6 inherit;white-space:pre-wrap;max-height:220px;overflow-y:auto}
 .updates-actions{display:flex;gap:9px}
+
+/* Doação */
+.nav-donate span{color:#ff8fb3}
+.donate-card{padding:26px;display:flex;gap:26px;align-items:center;margin-top:14px;max-width:720px}
+.donate-qr{flex:0 0 auto;width:168px;height:168px;padding:10px;border-radius:12px;background:#fff}
+.donate-qr svg{width:100%;height:100%;display:block}
+.donate-info{min-width:0;flex:1}
+.donate-key-row{display:flex;align-items:center;gap:10px;margin-top:6px;flex-wrap:wrap}
+.donate-key-row code{background:#0e161e;border:1px solid #2a3948;border-radius:8px;padding:9px 12px;font:12px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;color:#c7d5e1;overflow-wrap:anywhere}
+.donate-hint{margin:14px 0 0;color:#8ca0b1;font-size:12px;line-height:1.6;max-width:420px}
+#donate-github{margin-top:10px;font-size:12px}
+@media(max-width:640px){.donate-card{flex-direction:column;align-items:flex-start}}

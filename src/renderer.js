@@ -35,15 +35,21 @@ function showToast(message) { toast.textContent = message; toast.classList.add('
 function switchView(view) {
   document.querySelectorAll('.view').forEach(element => element.classList.toggle('active-view', element.id === view));
   document.querySelectorAll('.nav-item').forEach(element => element.classList.toggle('active', element.dataset.view === view));
-  document.querySelector('#page-title').textContent = { dashboard: 'Visão geral', performance: 'Desempenho', profiles: 'Perfis', ram: 'Gerenciamento de RAM', history: 'Atividade', updates: 'Atualizações', settings: 'Preferências' }[view];
+  document.querySelector('#page-title').textContent = { dashboard: 'Visão geral', performance: 'Desempenho', profiles: 'Perfis', ram: 'Gerenciamento de RAM', history: 'Atividade', updates: 'Atualizações', donate: 'Doação', settings: 'Preferências' }[view];
   if (view === 'performance') startPerformancePolling(); else stopPerformancePolling();
   if (view === 'ram') startRamPolling(); else stopRamPolling();
-  if (view === 'updates' && !updates.checked) { updates.checked = true; checkForUpdates(); }
+  // A checagem em si já roda sozinha ao abrir o app (ver bootstrap no fim do
+  // arquivo); aqui só apaga a bolinha de aviso, porque o usuário acabou de ver.
+  if (view === 'updates') document.querySelector('#updates-nav-dot').hidden = true;
 }
 
 // ---------- Desempenho: histórico curto em memória (só nesta sessão da tela) + mini-gráficos SVG ----------
 const PERF_HISTORY_LEN = 30;
-const PERF_POLL_MS = 2500;
+// Era 2500ms: a maior parte da demora percebida vinha de cada leitura abrir um
+// powershell.exe novo (agora reaproveitado, ver runInPerfShell no processo
+// principal), não deste intervalo. 1000ms casa com a taxa de atualização dos
+// contadores de desempenho do próprio Windows (~1x/s), sem sobrecarregar à toa.
+const PERF_POLL_MS = 1000;
 const perf = { timerId: null, active: false, specsLoaded: false, cpuSpecBase: '', history: { cpu: [], mem: [], gpu: [], disk: [], net: [] } };
 
 function pushPerfHistory(key, value) {
@@ -456,7 +462,7 @@ async function applySelectedProfile() {
   }
 }
 
-// ---------- Atualizações: verificação manual contra os Releases do GitHub ----------
+// ---------- Atualizações: verifica os Releases do GitHub ao abrir o app, e também sob demanda ----------
 const updates = { checked: false, checking: false };
 
 function renderUpdatesResult(result) {
@@ -468,6 +474,11 @@ function renderUpdatesResult(result) {
   const downloadButton = document.querySelector('#updates-download');
 
   currentEl.textContent = result.currentVersion ? `v${result.currentVersion}` : '—';
+
+  // Se o usuário já está com a aba de Atualizações aberta, a página em si já
+  // conta a novidade — a bolinha só faz sentido pra chamar atenção de fora.
+  const onUpdatesView = document.querySelector('.nav-item.active')?.dataset.view === 'updates';
+  const dot = document.querySelector('#updates-nav-dot');
 
   if (!result.ok) {
     status.textContent = result.error || 'Não foi possível verificar agora';
@@ -486,11 +497,13 @@ function renderUpdatesResult(result) {
     badge.className = 'tweak-badge on';
     downloadButton.hidden = false;
     downloadButton.dataset.url = result.releaseUrl;
+    if (dot) dot.hidden = onUpdatesView;
   } else {
     status.textContent = 'Você está na versão mais recente';
     badge.textContent = 'Atualizado';
     badge.className = 'tweak-badge on';
     downloadButton.hidden = true;
+    if (dot) dot.hidden = true;
   }
   if (result.releaseNotes && result.releaseNotes.trim()) { notesEl.textContent = result.releaseNotes.trim(); notesEl.hidden = false; }
   else notesEl.hidden = true;
@@ -498,7 +511,7 @@ function renderUpdatesResult(result) {
 
 async function checkForUpdates() {
   if (updates.checking || !window.amaralBoost?.checkForUpdates) return;
-  updates.checking = true;
+  updates.checking = true; updates.checked = true;
   const status = document.querySelector('#updates-status');
   const checkButton = document.querySelector('#updates-check-now');
   status.textContent = 'Verificando…';
@@ -519,6 +532,22 @@ document.querySelector('#updates-download').addEventListener('click', async even
   const url = event.currentTarget.dataset.url;
   if (!url || !window.amaralBoost?.openExternal) return;
   try { await window.amaralBoost.openExternal(url); } catch { showToast('Não foi possível abrir o link de download.'); }
+});
+
+document.querySelector('#copy-pix-key').addEventListener('click', async () => {
+  const key = document.querySelector('#pix-key').textContent.trim();
+  try {
+    if (window.amaralBoost?.copyText) await window.amaralBoost.copyText(key);
+    else await navigator.clipboard.writeText(key);
+    showToast('Chave Pix copiada.');
+  } catch {
+    showToast('Não foi possível copiar automaticamente. Selecione e copie a chave manualmente.');
+  }
+});
+document.querySelector('#donate-github').addEventListener('click', async () => {
+  const url = 'https://github.com/Amaralbit/AmaralBoost';
+  if (!window.amaralBoost?.openExternal) return;
+  try { await window.amaralBoost.openExternal(url); } catch { showToast('Não foi possível abrir o link do GitHub.'); }
 });
 
 // Enquanto o app fica em segundo plano na bandeja, a janela existe mas fica oculta:
@@ -573,3 +602,6 @@ refreshProfileState();
 loadSystemInfo();
 loadHistory();
 loadTweaksCatalog().then(loadTweaksState);
+// Verifica atualização toda vez que o app abre do zero, sem esperar o usuário
+// entrar na aba — a bolinha vermelha no menu chama atenção se houver novidade.
+checkForUpdates();

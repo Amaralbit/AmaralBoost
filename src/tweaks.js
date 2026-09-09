@@ -186,8 +186,31 @@ const CLEANUPS = [
     name: 'Limpar arquivos temporários',
     desc: 'Remove o conteúdo de %TEMP% e da pasta Temp do Windows. São arquivos descartáveis que o sistema recria quando precisa.',
     tags: ['limpeza'],
-    cmd: 'Remove-Item -Path "$env:TEMP\\*" -Recurse -Force -ErrorAction SilentlyContinue; ' +
-         'Remove-Item -Path "$env:WINDIR\\Temp\\*" -Recurse -Force -ErrorAction SilentlyContinue',
+    // Um único "Remove-Item -Recurse -ErrorAction SilentlyContinue" sobre o
+    // curinga não dá nenhum retorno útil: sucesso e "não removeu nada porque
+    // tudo estava em uso" ficam indistinguíveis pro usuário. Aqui cada item de
+    // topo é removido em try/catch isolado, então um arquivo travado (comum em
+    // %TEMP%, que sempre tem coisa em uso) não afeta os outros, e o resultado
+    // em JSON alimenta uma mensagem honesta em vez de um "sucesso" fixo.
+    cmd: `
+      $roots = @($env:TEMP, (Join-Path $env:WINDIR 'Temp'))
+      $removed = 0; $failed = 0; $freedBytes = 0
+      foreach ($root in $roots) {
+        Get-ChildItem -LiteralPath $root -Force -ErrorAction SilentlyContinue | ForEach-Object {
+          $item = $_
+          try {
+            $size = if ($item.PSIsContainer) {
+              (Get-ChildItem -LiteralPath $item.FullName -Recurse -Force -ErrorAction SilentlyContinue |
+                Where-Object { -not $_.PSIsContainer } | Measure-Object -Property Length -Sum).Sum
+            } else { $item.Length }
+            Remove-Item -LiteralPath $item.FullName -Recurse -Force -ErrorAction Stop
+            $removed++
+            if ($size) { $freedBytes += $size }
+          } catch { $failed++ }
+        }
+      }
+      [pscustomobject]@{ removed = $removed; failed = $failed; freedMB = [math]::Round($freedBytes / 1MB, 1) } | ConvertTo-Json -Compress
+    `,
     successMessage: 'Arquivos temporários removidos.'
   },
   {
