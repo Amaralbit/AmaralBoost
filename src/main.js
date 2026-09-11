@@ -142,6 +142,131 @@ async function runWindows(command, args) {
   return execFileAsync(command, args, { windowsHide: true, timeout: 10000, maxBuffer: 1024 * 1024 });
 }
 
+// ---------- Armazenamento: apps instalados maiores que 10 GB ----------
+// O Windows não mantém uma medida confiável do tamanho de todos os programas.
+// Por isso lemos apenas instalações registradas e somamos os arquivos reais da
+// pasta de cada uma, sem tocar em nenhum arquivo. O trabalho só começa quando
+// a pessoa escolhe uma unidade e pede a verificação.
+const STORAGE_APP_MIN_BYTES = 10 * 1024 ** 3;
+
+function normalizeDriveLetter(drive) {
+  return typeof drive === 'string' && /^[A-Za-z]:$/.test(drive.trim()) ? drive.trim().toUpperCase() : null;
+}
+
+function normalizeInstallPath(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const normalized = path.resolve(value.trim().replace(/^"|"$/g, ''));
+  const root = path.parse(normalized).root;
+  return root && normalized.toLowerCase() !== root.toLowerCase() ? normalized : null;
+}
+
+async function getStorageDrives() {
+  if (process.platform !== 'win32') return { supported: false, drives: [] };
+  const script = `
+    Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType = 3' | ForEach-Object {
+      [pscustomobject]@{
+        letter = $_.DeviceID
+        label = if ($_.VolumeName) { $_.VolumeName } else { 'Disco local' }
+        totalBytes = [Int64]$_.Size
+        freeBytes = [Int64]$_.FreeSpace
+      }
+    } | Sort-Object letter | ConvertTo-Json -Compress
+  `;
+  try {
+    const parsed = JSON.parse(await runPowerShellScript(script, 10000) || '[]');
+    const drives = (Array.isArray(parsed) ? parsed : [parsed]).filter(drive => normalizeDriveLetter(drive.letter));
+    return { supported: true, drives };
+  } catch {
+    return { supported: true, drives: [] };
+  }
+}
+
+async function getRegisteredInstalledApps() {
+  const script = `
+    $roots = @(
+      'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+      'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall',
+      'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall'
+    )
+    $items = foreach ($root in $roots) {
+      if (-not (Test-Path -LiteralPath $root)) { continue }
+      Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue | ForEach-Object {
+        $app = Get-ItemProperty -LiteralPath $_.PSPath -ErrorAction SilentlyContinue
+        $installLocation = if ($app.InstallLocation) { [Environment]::ExpandEnvironmentVariables([string]$app.InstallLocation).Trim().Trim('"') } else { $null }
+        if ($app.DisplayName -and $installLocation) {
+          [pscustomobject]@{
+            name = [string]$app.DisplayName
+            publisher = if ($app.Publisher) { [string]$app.Publisher } else { $null }
+            installLocation = $installLocation
+          }
+        }
+      }
+    }
+    @($items) | ConvertTo-Json -Compress
+  `;
+  try {
+    const parsed = JSON.parse(await runPowerShellScript(script, 15000) || '[]');
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+}
+
+async function directorySizeBytes(rootPath) {
+  let total = 0;
+  const pending = [rootPath];
+  while (pending.length) {
+    const current = pending.pop();
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      const entryPath = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      } else if (entry.isFile()) {
+        try {
+          const stats = await fs.stat(entryPath);
+          total += stats.size;
+        } catch { /* arquivo pode estar em uso ou protegido; segue a leitura */ }
+      }
+    }
+  }
+  return total;
+}
+
+async function scanStorageApps(drive) {
+  if (process.platform !== 'win32') return { supported: false, apps: [] };
+  const selectedDrive = normalizeDriveLetter(drive);
+  if (!selectedDrive) return { supported: true, apps: [], error: 'Escolha uma unidade válida.' };
+  const registeredApps = await getRegisteredInstalledApps();
+  const uniqueApps = [];
+  const seenPaths = new Set();
+  for (const appEntry of registeredApps) {
+    const installPath = normalizeInstallPath(appEntry.installLocation);
+    if (!installPath || path.parse(installPath).root.toUpperCase() !== `${selectedDrive}\\`) continue;
+    const pathKey = installPath.toLowerCase();
+    if (seenPaths.has(pathKey)) continue;
+    seenPaths.add(pathKey);
+    uniqueApps.push({ name: safeText(appEntry.name) || path.basename(installPath), publisher: safeText(appEntry.publisher), installPath });
+  }
+
+  const apps = [];
+  for (const appEntry of uniqueApps) {
+    let stats;
+    try { stats = await fs.stat(appEntry.installPath); } catch { continue; }
+    if (!stats.isDirectory()) continue;
+    const sizeBytes = await directorySizeBytes(appEntry.installPath);
+    if (sizeBytes > STORAGE_APP_MIN_BYTES) apps.push({ ...appEntry, sizeBytes });
+  }
+  apps.sort((a, b) => b.sizeBytes - a.sizeBytes || a.name.localeCompare(b.name, 'pt-BR'));
+  return { supported: true, drive: selectedDrive, scannedApps: uniqueApps.length, apps };
+}
+
 // ---------- tela Desempenho: leitura local ao vivo ----------
 // Specs (modelo, núcleos, tipo/velocidade de RAM, disco, adaptador de rede) mudam
 // raramente durante uma sessão, então são lidas uma vez e guardadas em memória.
@@ -628,6 +753,161 @@ async function disableRamLimit() {
   return { ...result, historyEntry, state: await ramLimit.getState().catch(() => null) };
 }
 
+// ---------- Inicialização do Windows ----------
+// O Registro guarda o comando original em Run; para desligá-lo sem apagá-lo,
+// o Windows usa a chave StartupApproved. Assim, ligar e desligar nunca perde o
+// caminho, argumentos ou configuração que outro app gravou. Itens das pastas
+// Inicializar são apenas renomeados e o nome original fica salvo localmente.
+const STARTUP_FOLDER_DISABLED_SUFFIX = '.amaral-boost-disabled';
+const STARTUP_SOURCES = [
+  { source: 'user-run', kind: 'registry', key: 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run', approvalKey: 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run', location: 'Registro — usuário atual' },
+  { source: 'machine-run', kind: 'registry', key: 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run', approvalKey: 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run', location: 'Registro — todos os usuários' },
+  { source: 'machine-run32', kind: 'registry', key: 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run', approvalKey: 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run32', location: 'Registro — todos os usuários (32 bits)' }
+];
+
+function startupFolderSources() {
+  const programData = process.env.ProgramData || 'C:\\ProgramData';
+  return [
+    { source: 'user-folder', kind: 'folder', path: path.join(app.getPath('appData'), 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup'), location: 'Pasta Inicializar — usuário atual' },
+    { source: 'machine-folder', kind: 'folder', path: path.join(programData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup'), location: 'Pasta Inicializar — todos os usuários' }
+  ];
+}
+
+function getStartupFolderStatePath() {
+  return path.join(app.getPath('userData'), 'amaral-boost-startup-folder-state.json');
+}
+
+async function readStartupFolderState() {
+  try {
+    const parsed = JSON.parse(await fs.readFile(getStartupFolderStatePath(), 'utf8'));
+    return Array.isArray(parsed?.disabled) ? parsed : { disabled: [] };
+  } catch {
+    return { disabled: [] };
+  }
+}
+
+async function writeStartupFolderState(state) {
+  await fs.mkdir(path.dirname(getStartupFolderStatePath()), { recursive: true });
+  await fs.writeFile(getStartupFolderStatePath(), JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 });
+}
+
+async function getStartupApps() {
+  if (process.platform !== 'win32') return { supported: false, apps: [] };
+  const script = `
+    $sources = @(
+      [pscustomobject]@{ Source = 'user-run'; Key = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run'; ApprovalKey = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run'; Location = 'Registro — usuário atual' },
+      [pscustomobject]@{ Source = 'machine-run'; Key = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run'; ApprovalKey = 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run'; Location = 'Registro — todos os usuários' },
+      [pscustomobject]@{ Source = 'machine-run32'; Key = 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Run'; ApprovalKey = 'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run32'; Location = 'Registro — todos os usuários (32 bits)' }
+    )
+    $items = foreach ($source in $sources) {
+      if (-not (Test-Path -LiteralPath $source.Key)) { continue }
+      $key = Get-Item -LiteralPath $source.Key
+      foreach ($name in $key.GetValueNames()) {
+        $command = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if ($null -eq $command) { continue }
+        $approval = $null
+        if (Test-Path -LiteralPath $source.ApprovalKey) { $approval = (Get-Item -LiteralPath $source.ApprovalKey).GetValue($name, $null) }
+        $enabled = $true
+        if ($approval -is [byte[]] -and $approval.Length -gt 0 -and $approval[0] -eq 3) { $enabled = $false }
+        [pscustomobject]@{ kind = 'registry'; source = $source.Source; name = $name; command = [string]$command; location = $source.Location; enabled = $enabled }
+      }
+    }
+    @($items) | ConvertTo-Json -Compress
+  `;
+  let registryApps = [];
+  try {
+    const parsed = JSON.parse(await runPowerShellScript(script, 15000) || '[]');
+    registryApps = Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    registryApps = [];
+  }
+
+  const folderState = await readStartupFolderState();
+  const folderApps = [];
+  for (const source of startupFolderSources()) {
+    try {
+      const entries = await fs.readdir(source.path, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() || entry.name.endsWith(STARTUP_FOLDER_DISABLED_SUFFIX)) continue;
+        folderApps.push({ kind: 'folder', source: source.source, name: entry.name, command: path.join(source.path, entry.name), location: source.location, enabled: true });
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') continue;
+    }
+  }
+  for (const disabled of folderState.disabled) {
+    const source = startupFolderSources().find(item => item.source === disabled.source);
+    if (!source || !disabled.originalName || !disabled.disabledName) continue;
+    try {
+      await fs.access(path.join(source.path, disabled.disabledName));
+      folderApps.push({ kind: 'folder', source: source.source, name: disabled.originalName, command: path.join(source.path, disabled.originalName), location: source.location, enabled: false });
+    } catch { /* o arquivo foi removido fora do app; não o exibe */ }
+  }
+
+  const apps = [...registryApps, ...folderApps].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  return { supported: true, apps };
+}
+
+async function setStartupRegistryEnabled(item, enabled) {
+  const source = STARTUP_SOURCES.find(candidate => candidate.source === item.source);
+  if (!source) throw new Error('Origem de inicialização inválida.');
+  const script = `
+    $runKey = '${psQuote(source.key)}'
+    $approvalKey = '${psQuote(source.approvalKey)}'
+    $name = '${psQuote(item.name)}'
+    if (-not (Test-Path -LiteralPath $runKey)) { throw 'A entrada de inicialização não existe mais.' }
+    $run = Get-Item -LiteralPath $runKey
+    if ($run.GetValueNames() -notcontains $name) { throw 'A entrada de inicialização não existe mais.' }
+    New-Item -Path $approvalKey -Force | Out-Null
+    $value = New-Object byte[] 12
+    $value[0] = if (${enabled ? '$true' : '$false'}) { 2 } else { 3 }
+    if (-not ${enabled ? '$true' : '$false'}) { [BitConverter]::GetBytes([DateTime]::UtcNow.ToFileTimeUtc()).CopyTo($value, 4) }
+    New-ItemProperty -Path $approvalKey -Name $name -PropertyType Binary -Value $value -Force | Out-Null
+  `;
+  await runPowerShellScript(script, 10000);
+}
+
+async function setStartupFolderEnabled(item, enabled) {
+  const source = startupFolderSources().find(candidate => candidate.source === item.source);
+  if (!source) throw new Error('Origem de inicialização inválida.');
+  const state = await readStartupFolderState();
+  const stateIndex = state.disabled.findIndex(entry => entry.source === item.source && entry.originalName === item.name);
+  if (enabled) {
+    if (stateIndex < 0) throw new Error('Não foi possível localizar o item desativado. Atualize a lista e tente novamente.');
+    const entry = state.disabled[stateIndex];
+    await fs.rename(path.join(source.path, entry.disabledName), path.join(source.path, entry.originalName));
+    state.disabled.splice(stateIndex, 1);
+  } else {
+    if (stateIndex >= 0) return;
+    const disabledName = `${item.name}${STARTUP_FOLDER_DISABLED_SUFFIX}`;
+    await fs.rename(path.join(source.path, item.name), path.join(source.path, disabledName));
+    state.disabled.push({ source: item.source, originalName: item.name, disabledName });
+  }
+  await writeStartupFolderState(state);
+}
+
+async function setStartupAppEnabled(item, enabled) {
+  if (process.platform !== 'win32') return { ok: false, message: 'Este recurso está disponível somente no Windows.' };
+  if (!item || typeof item !== 'object' || typeof item.kind !== 'string' || typeof item.source !== 'string' || typeof item.name !== 'string' || typeof enabled !== 'boolean') {
+    return { ok: false, message: 'Item de inicialização inválido.' };
+  }
+  const current = await getStartupApps();
+  const found = current.apps.find(candidate => candidate.kind === item.kind && candidate.source === item.source && candidate.name === item.name);
+  if (!found) return { ok: false, message: 'Este item não existe mais. Atualize a lista.' };
+  if (found.enabled === enabled) return { ok: true, unchanged: true, message: enabled ? 'Este app já estava ativado.' : 'Este app já estava desativado.' };
+  try {
+    if (found.kind === 'registry') await setStartupRegistryEnabled(found, enabled);
+    else if (found.kind === 'folder') await setStartupFolderEnabled(found, enabled);
+    else throw new Error('Tipo de item inválido.');
+    const label = `${enabled ? 'Ativar' : 'Desativar'} na inicialização: ${found.name}`;
+    const message = enabled ? 'App ativado para iniciar com o Windows.' : 'App desativado da inicialização do Windows.';
+    const historyEntry = await recordTweakHistory('startup', label, true, false, message);
+    return { ok: true, message, historyEntry };
+  } catch (error) {
+    return { ok: false, message: error?.message || 'Não foi possível alterar este item.' };
+  }
+}
+
 // Algumas limpezas (ex.: clean-temp) devolvem um JSON com contagem real de
 // itens removidos/mantidos em vez de uma mensagem fixa — só assim dá pra
 // distinguir "limpou tudo" de "nada pôde ser removido" na hora.
@@ -1078,6 +1358,10 @@ app.whenReady().then(() => {
   ipcMain.handle('ram:get-state', () => ramLimit.getState());
   ipcMain.handle('ram:enable', (_event, limitMB) => enableRamLimit(limitMB));
   ipcMain.handle('ram:disable', () => disableRamLimit());
+  ipcMain.handle('startup:get-apps', () => getStartupApps());
+  ipcMain.handle('startup:set-enabled', (_event, item, enabled) => setStartupAppEnabled(item, enabled));
+  ipcMain.handle('storage:get-drives', () => getStorageDrives());
+  ipcMain.handle('storage:scan-apps', (_event, drive) => scanStorageApps(drive));
   ipcMain.handle('updates:check', () => checkForUpdates());
   ipcMain.handle('app:open-external', (_event, url) => openExternalLink(url));
   ipcMain.handle('app:copy-text', (_event, text) => { clipboard.writeText(String(text ?? '')); return { copied: true }; });

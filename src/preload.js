@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld('amaralBoost', {
   getRamLimitState: () => ipcRenderer.invoke('ram:get-state'),
   enableRamLimit: limitMB => ipcRenderer.invoke('ram:enable', limitMB),
   disableRamLimit: () => ipcRenderer.invoke('ram:disable'),
+  getStartupApps: () => ipcRenderer.invoke('startup:get-apps'),
+  setStartupAppEnabled: (item, enabled) => ipcRenderer.invoke('startup:set-enabled', item, enabled),
+  getStorageDrives: () => ipcRenderer.invoke('storage:get-drives'),
+  scanStorageApps: drive => ipcRenderer.invoke('storage:scan-apps', drive),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
   openExternal: url => ipcRenderer.invoke('app:open-external', url),
   copyText: text => ipcRenderer.invoke('app:copy-text', text)

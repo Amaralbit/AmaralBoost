@@ -92,6 +92,39 @@
 .ram-limit-range-hint{margin:8px 0 0}
 .ram-limit-actions{display:flex;justify-content:flex-end}
 
+/* Inicialização */
+.startup-list{margin-top:14px;padding:6px 20px}
+.startup-row{display:flex;align-items:center;gap:16px;padding:15px 0;border-bottom:1px solid #263542}
+.startup-row:last-child{border-bottom:0}
+.startup-app-icon{width:34px;height:34px;flex:0 0 auto;display:grid;place-items:center;border-radius:10px;background:#20384d;color:#77c4ff}
+.startup-app-icon svg{width:18px;height:18px}
+.startup-app-info{min-width:0;flex:1}
+.startup-app-name{display:block;font-size:13px;color:#e7edf3}
+.startup-app-meta{display:block;margin-top:5px;color:#8498aa;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.startup-app-location{display:block;margin-top:4px;color:#66839a;font-size:10px}
+.startup-row .switch{flex:0 0 auto}
+.startup-row .switch input:disabled+span{cursor:wait;opacity:.55}
+.startup-empty{padding:42px 12px;text-align:center;color:#8ca0b1;font-size:12px;line-height:1.6}
+
+/* Armazenamento */
+.storage-controls{margin-top:14px;padding:18px 20px;display:flex;align-items:center;justify-content:space-between;gap:18px}
+.storage-controls label{display:block;color:#d8e5ed;font-size:13px;font-weight:700}
+.storage-controls p{margin:6px 0 0}
+.storage-actions{display:flex;align-items:center;gap:10px;flex:0 0 auto}
+.storage-actions select{min-width:205px;border:1px solid #395064;border-radius:9px;background:#0e161e;color:#dce8f0;font:inherit;padding:9px 32px 9px 11px}
+.storage-actions select:disabled{opacity:.55}
+.storage-list{margin-top:14px;padding:6px 20px}
+.storage-row{display:flex;align-items:center;gap:16px;padding:15px 0;border-bottom:1px solid #263542}
+.storage-row:last-child{border-bottom:0}
+.storage-app-icon{width:36px;height:36px;flex:0 0 auto;display:grid;place-items:center;border-radius:10px;background:#2b2849;color:#b5a5ff}
+.storage-app-icon svg{width:19px;height:19px}
+.storage-app-info{min-width:0;flex:1}
+.storage-app-name{display:block;font-size:13px;color:#e7edf3}
+.storage-app-path{display:block;margin-top:5px;color:#8498aa;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.storage-app-publisher{display:block;margin-top:4px;color:#66839a;font-size:10px}
+.storage-app-size{color:#bcaeff;font-size:18px;font-weight:750;letter-spacing:-.35px;white-space:nowrap}
+@media(max-width:900px){.storage-controls{align-items:flex-start;flex-direction:column}.storage-actions{width:100%}.storage-actions select{flex:1}.storage-row{align-items:flex-start}.storage-app-size{margin-left:auto}}
+
 /* Revisão de perfil: perfis com pacotes maiores (ex.: Gamer) rendem uma lista
    mais alta que a tela — sem isso o card crescia livre e o botão "Aplicar
    perfil" ficava fora da área visível, sem como rolar até ele. */

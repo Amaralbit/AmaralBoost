@@ -35,9 +35,11 @@ function showToast(message) { toast.textContent = message; toast.classList.add('
 function switchView(view) {
   document.querySelectorAll('.view').forEach(element => element.classList.toggle('active-view', element.id === view));
   document.querySelectorAll('.nav-item').forEach(element => element.classList.toggle('active', element.dataset.view === view));
-  document.querySelector('#page-title').textContent = { dashboard: 'Visão geral', performance: 'Desempenho', profiles: 'Perfis', cleanups: 'Limpeza', ram: 'Gerenciamento de RAM', history: 'Atividade', updates: 'Atualizações', donate: 'Doação', settings: 'Preferências' }[view];
+  document.querySelector('#page-title').textContent = { dashboard: 'Visão geral', performance: 'Desempenho', profiles: 'Perfis', cleanups: 'Limpeza', ram: 'Gerenciamento de RAM', storage: 'Armazenamento', startup: 'Inicialização', history: 'Atividade', updates: 'Atualizações', donate: 'Doação', settings: 'Preferências' }[view];
   if (view === 'performance') startPerformancePolling(); else stopPerformancePolling();
   if (view === 'ram') startRamPolling(); else stopRamPolling();
+  if (view === 'storage') loadStorageDrives();
+  if (view === 'startup') loadStartupApps();
   // A checagem em si já roda sozinha ao abrir o app (ver bootstrap no fim do
   // arquivo); aqui só apaga a bolinha de aviso, porque o usuário acabou de ver.
   if (view === 'updates') document.querySelector('#updates-nav-dot').hidden = true;
@@ -221,6 +223,205 @@ async function pollRamOnce() {
 function startRamPolling() { if (ram.active) return; ram.active = true; pollRamOnce(); }
 function stopRamPolling() { ram.active = false; clearTimeout(ram.timerId); ram.timerId = null; }
 
+// ---------- Inicialização: entradas do Registro e das pastas Inicializar ----------
+const startup = { loading: false, apps: [] };
+
+function startupIcon() {
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20V5"/><path d="m6.5 10.5 5.5-5.5 5.5 5.5"/><path d="M5 19.5h14"/></svg>';
+}
+
+function renderStartupApps(data) {
+  const list = document.querySelector('#startup-list');
+  const status = document.querySelector('#startup-status');
+  list.replaceChildren();
+  if (!data?.supported) {
+    status.textContent = 'Disponível somente no Windows';
+    list.innerHTML = '<p class="startup-empty">A lista de inicialização está disponível somente quando o Amaral Boost roda no Windows.</p>';
+    return;
+  }
+  startup.apps = data.apps || [];
+  const enabledCount = startup.apps.filter(app => app.enabled).length;
+  status.textContent = startup.apps.length ? `${enabledCount} de ${startup.apps.length} ativado(s)` : 'Nenhum app encontrado';
+  if (!startup.apps.length) {
+    list.innerHTML = '<p class="startup-empty">Nenhum app foi encontrado nas entradas de inicialização do Registro ou nas pastas Inicializar.</p>';
+    return;
+  }
+  startup.apps.forEach(app => {
+    const row = document.createElement('article'); row.className = 'startup-row';
+    const icon = document.createElement('span'); icon.className = 'startup-app-icon'; icon.innerHTML = startupIcon();
+    const info = document.createElement('div'); info.className = 'startup-app-info';
+    const name = document.createElement('strong'); name.className = 'startup-app-name'; name.textContent = app.name;
+    const command = document.createElement('span'); command.className = 'startup-app-meta'; command.textContent = app.command;
+    const location = document.createElement('span'); location.className = 'startup-app-location'; location.textContent = app.location;
+    info.append(name, command, location);
+    const label = document.createElement('label'); label.className = 'switch'; label.title = app.enabled ? 'Desativar na inicialização' : 'Ativar na inicialização';
+    const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.checked = Boolean(app.enabled); toggle.setAttribute('aria-label', `${app.enabled ? 'Desativar' : 'Ativar'} ${app.name} na inicialização`);
+    const track = document.createElement('span');
+    label.append(toggle, track);
+    toggle.addEventListener('change', () => setStartupEnabled(app, toggle, label));
+    row.append(icon, info, label);
+    list.append(row);
+  });
+}
+
+async function loadStartupApps() {
+  if (startup.loading || !window.amaralBoost?.getStartupApps) return;
+  startup.loading = true;
+  const status = document.querySelector('#startup-status');
+  status.textContent = 'Lendo…';
+  try {
+    renderStartupApps(await window.amaralBoost.getStartupApps());
+  } catch {
+    status.textContent = 'Não foi possível ler a inicialização';
+    document.querySelector('#startup-list').innerHTML = '<p class="startup-empty">Não foi possível obter as entradas de inicialização agora.</p>';
+  } finally {
+    startup.loading = false;
+  }
+}
+
+async function setStartupEnabled(app, toggle, label) {
+  if (!window.amaralBoost?.setStartupAppEnabled) return;
+  const enabled = toggle.checked;
+  toggle.disabled = true;
+  label.title = 'Aplicando…';
+  try {
+    const result = await window.amaralBoost.setStartupAppEnabled({ kind: app.kind, source: app.source, name: app.name }, enabled);
+    if (!result.ok) throw new Error(result.message);
+    if (result.historyEntry) { state.history.unshift(result.historyEntry); renderHistory(); }
+    showToast(result.message);
+    await loadStartupApps();
+  } catch (error) {
+    toggle.checked = !enabled;
+    toggle.disabled = false;
+    label.title = !enabled ? 'Desativar na inicialização' : 'Ativar na inicialização';
+    showToast(error?.message || 'Não foi possível alterar este app.');
+  }
+}
+
+// ---------- Armazenamento: instalações registradas maiores que 10 GB ----------
+const storage = { loadingDrives: false, scanning: false, drivesLoaded: false, drives: [] };
+
+function formatStorageSize(bytes) {
+  return typeof bytes === 'number' && bytes >= 0 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : '—';
+}
+
+function storageIcon() {
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"/><path d="M4.5 5.5v6c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-6"/><path d="M4.5 11.5v6c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-6"/></svg>';
+}
+
+function resetStorageResults(message) {
+  document.querySelector('#storage-list').innerHTML = `<p class="startup-empty">${message}</p>`;
+}
+
+function renderStorageDrives(data) {
+  const status = document.querySelector('#storage-status');
+  const select = document.querySelector('#storage-drive');
+  const detail = document.querySelector('#storage-drive-detail');
+  const scanButton = document.querySelector('#storage-scan');
+  if (!data?.supported) {
+    status.textContent = 'Disponível somente no Windows';
+    detail.textContent = 'A leitura de unidades não está disponível neste sistema.';
+    select.disabled = true; scanButton.disabled = true;
+    return;
+  }
+  storage.drives = data.drives || [];
+  select.replaceChildren();
+  if (!storage.drives.length) {
+    status.textContent = 'Nenhuma unidade encontrada';
+    detail.textContent = 'Não foi possível identificar unidades locais.';
+    select.disabled = true; scanButton.disabled = true;
+    return;
+  }
+  storage.drives.forEach(drive => {
+    const option = document.createElement('option'); option.value = drive.letter;
+    option.textContent = `${drive.letter} — ${drive.label} (${formatStorageSize(drive.freeBytes)} livres)`;
+    select.append(option);
+  });
+  const selected = storage.drives[0];
+  detail.textContent = `${selected.label} · ${formatStorageSize(selected.freeBytes)} livres de ${formatStorageSize(selected.totalBytes)}.`;
+  status.textContent = 'Pronto para verificar';
+  select.disabled = false; scanButton.disabled = false;
+}
+
+async function loadStorageDrives() {
+  if (storage.loadingDrives || storage.drivesLoaded || !window.amaralBoost?.getStorageDrives) return;
+  storage.loadingDrives = true;
+  try {
+    renderStorageDrives(await window.amaralBoost.getStorageDrives());
+    storage.drivesLoaded = true;
+  } catch {
+    document.querySelector('#storage-status').textContent = 'Não foi possível ler as unidades';
+    document.querySelector('#storage-drive-detail').textContent = 'Tente abrir a tela novamente.';
+    resetStorageResults('Não foi possível obter as unidades locais agora.');
+  } finally {
+    storage.loadingDrives = false;
+  }
+}
+
+function updateSelectedStorageDrive() {
+  const selected = storage.drives.find(drive => drive.letter === document.querySelector('#storage-drive').value);
+  if (!selected) return;
+  document.querySelector('#storage-drive-detail').textContent = `${selected.label} · ${formatStorageSize(selected.freeBytes)} livres de ${formatStorageSize(selected.totalBytes)}.`;
+  document.querySelector('#storage-status').textContent = 'Pronto para verificar';
+  resetStorageResults('Clique em “Verificar armazenamento” para procurar apps maiores que 10 GB nesta unidade.');
+}
+
+function renderStorageApps(result) {
+  const list = document.querySelector('#storage-list');
+  const status = document.querySelector('#storage-status');
+  list.replaceChildren();
+  if (!result?.supported) {
+    status.textContent = 'Disponível somente no Windows';
+    resetStorageResults('A análise de armazenamento está disponível somente no Windows.');
+    return;
+  }
+  if (result.error) {
+    status.textContent = result.error;
+    resetStorageResults(result.error);
+    return;
+  }
+  const apps = result.apps || [];
+  status.textContent = apps.length ? `${apps.length} app(s) acima de 10 GB` : 'Nenhum app acima de 10 GB';
+  if (!apps.length) {
+    resetStorageResults(`Foram verificadas ${result.scannedApps || 0} instalação(ões) registradas em ${result.drive}. Nenhuma passou de 10 GB.`);
+    return;
+  }
+  apps.forEach(app => {
+    const row = document.createElement('article'); row.className = 'storage-row';
+    const icon = document.createElement('span'); icon.className = 'storage-app-icon'; icon.innerHTML = storageIcon();
+    const info = document.createElement('div'); info.className = 'storage-app-info';
+    const name = document.createElement('strong'); name.className = 'storage-app-name'; name.textContent = app.name;
+    const installPath = document.createElement('span'); installPath.className = 'storage-app-path'; installPath.textContent = app.installPath;
+    const publisher = document.createElement('span'); publisher.className = 'storage-app-publisher'; publisher.textContent = app.publisher || 'Fornecedor não informado';
+    const size = document.createElement('strong'); size.className = 'storage-app-size'; size.textContent = formatStorageSize(app.sizeBytes);
+    info.append(name, installPath, publisher);
+    row.append(icon, info, size);
+    list.append(row);
+  });
+}
+
+async function scanStorageApps() {
+  if (storage.scanning || !window.amaralBoost?.scanStorageApps) return;
+  const drive = document.querySelector('#storage-drive').value;
+  if (!drive) return;
+  storage.scanning = true;
+  const status = document.querySelector('#storage-status');
+  const select = document.querySelector('#storage-drive');
+  const scanButton = document.querySelector('#storage-scan');
+  status.textContent = `Verificando instalações em ${drive}…`;
+  select.disabled = true; scanButton.disabled = true; scanButton.textContent = 'Verificando…';
+  resetStorageResults('A leitura pode levar alguns instantes em unidades com muitos apps.');
+  try {
+    renderStorageApps(await window.amaralBoost.scanStorageApps(drive));
+  } catch {
+    status.textContent = 'Não foi possível concluir a verificação';
+    resetStorageResults('Não foi possível analisar as instalações nesta unidade.');
+  } finally {
+    storage.scanning = false;
+    select.disabled = false; scanButton.disabled = false; scanButton.textContent = 'Verificar armazenamento';
+  }
+}
+
 function openRamEnableReview() {
   if (!ram.data) return;
   const gb = formatGB(ram.draftLimitMB);
@@ -338,6 +539,7 @@ function historyTitle(entry) {
   if (entry.kind === 'tweak') return `Ajuste: ${entry.label}`;
   if (entry.kind === 'cleanup') return `Limpeza: ${entry.label}`;
   if (entry.kind === 'ram-limit') return entry.label;
+  if (entry.kind === 'startup') return entry.label;
   return `Perfil: ${entry.profile || entry.label}`;
 }
 
@@ -588,6 +790,8 @@ document.querySelector('#ram-limit-toggle').addEventListener('click', () => {
   if (!ram.data.enabled || !ram.data.running) openRamEnableReview();
   else openRamDisableReview();
 });
+document.querySelector('#storage-drive').addEventListener('change', updateSelectedStorageDrive);
+document.querySelector('#storage-scan').addEventListener('click', scanStorageApps);
 
 (async () => {
   const versionEl = document.querySelector('#version');
