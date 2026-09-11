@@ -142,12 +142,25 @@ async function runWindows(command, args) {
   return execFileAsync(command, args, { windowsHide: true, timeout: 10000, maxBuffer: 1024 * 1024 });
 }
 
-// ---------- Armazenamento: apps instalados maiores que 10 GB ----------
-// O Windows não mantém uma medida confiável do tamanho de todos os programas.
-// Por isso lemos apenas instalações registradas e somamos os arquivos reais da
-// pasta de cada uma, sem tocar em nenhum arquivo. O trabalho só começa quando
-// a pessoa escolhe uma unidade e pede a verificação.
+// ---------- Armazenamento: apps e pastas maiores que 10 GB ----------
+// O Windows não mantém uma medida confiável do tamanho de todos os programas,
+// e nem todo consumidor de espaço é um app instalado (jogo baixado fora do
+// instalador padrão, pasta copiada manualmente, cache de outro programa...).
+// Por isso a varredura soma o tamanho real dos arquivos a partir da raiz da
+// unidade escolhida e aponta a pasta mais específica que já passa de 10 GB —
+// sem tocar em nenhum arquivo. O trabalho só começa quando a pessoa escolhe
+// a unidade e pede a verificação, porque percorrer a unidade inteira pode
+// demorar alguns minutos.
 const STORAGE_APP_MIN_BYTES = 10 * 1024 ** 3;
+// Pastas do sistema que nunca representam "um app ou uma pasta do usuário" —
+// pular evita erros de acesso previsíveis e tempo perdido em ambas.
+const STORAGE_SKIP_FOLDER_NAMES = new Set([
+  '$recycle.bin', 'system volume information', 'recovery', 'config.msi',
+  'documents and settings', '$windows.~bt', '$windows.~ws', '$sysreset', '$getcurrent'
+]);
+// Limite de profundidade só como proteção contra árvores de pastas
+// patologicamente profundas; na prática quase nada chega perto disso.
+const STORAGE_SCAN_MAX_DEPTH = 12;
 
 function normalizeDriveLetter(drive) {
   return typeof drive === 'string' && /^[A-Za-z]:$/.test(drive.trim()) ? drive.trim().toUpperCase() : null;
@@ -239,32 +252,81 @@ async function directorySizeBytes(rootPath) {
   return total;
 }
 
+// Percorre a árvore de pastas a partir de dirPath somando o tamanho real dos
+// arquivos. Para cada ramo, só reporta a pasta mais específica que já passa
+// de thresholdBytes: se uma subpasta sozinha já ultrapassa o limite, é ela
+// quem aparece — a pasta-pai não é listada por cima, senão tudo em Program
+// Files ou em Users acabaria "passando de 10 GB" só por conter tudo o resto.
+async function walkFolderSizes(dirPath, depth, thresholdBytes) {
+  let entries;
+  try {
+    entries = await fs.readdir(dirPath, { withFileTypes: true });
+  } catch {
+    return { sizeBytes: 0, reported: [] };
+  }
+
+  const fileEntries = entries.filter(entry => entry.isFile());
+  const fileSizes = await Promise.all(fileEntries.map(async entry => {
+    try { return (await fs.stat(path.join(dirPath, entry.name))).size; } catch { return 0; }
+  }));
+  const ownFileBytes = fileSizes.reduce((sum, size) => sum + size, 0);
+
+  const dirEntries = entries.filter(entry =>
+    entry.isDirectory() && !entry.isSymbolicLink() && !STORAGE_SKIP_FOLDER_NAMES.has(entry.name.toLowerCase())
+  );
+  const canDescend = depth < STORAGE_SCAN_MAX_DEPTH;
+  const childResults = await Promise.all(dirEntries.map(async entry => {
+    const entryPath = path.join(dirPath, entry.name);
+    if (canDescend) return walkFolderSizes(entryPath, depth + 1, thresholdBytes);
+    const sizeBytes = await directorySizeBytes(entryPath);
+    return { sizeBytes, reported: sizeBytes > thresholdBytes ? [{ installPath: entryPath, sizeBytes }] : [] };
+  }));
+
+  let childTotal = 0;
+  const childReports = [];
+  for (const child of childResults) {
+    childTotal += child.sizeBytes;
+    childReports.push(...child.reported);
+  }
+
+  const sizeBytes = ownFileBytes + childTotal;
+  if (childReports.length > 0) return { sizeBytes, reported: childReports };
+  // depth > 0 evita reportar a própria raiz da unidade como "uma pasta" —
+  // ela quase sempre passa de 10 GB e isso não diria nada de útil.
+  if (depth > 0 && sizeBytes > thresholdBytes) return { sizeBytes, reported: [{ installPath: dirPath, sizeBytes }] };
+  return { sizeBytes, reported: [] };
+}
+
 async function scanStorageApps(drive) {
   if (process.platform !== 'win32') return { supported: false, apps: [] };
   const selectedDrive = normalizeDriveLetter(drive);
   if (!selectedDrive) return { supported: true, apps: [], error: 'Escolha uma unidade válida.' };
+
   const registeredApps = await getRegisteredInstalledApps();
-  const uniqueApps = [];
-  const seenPaths = new Set();
+  const appsByPath = new Map();
   for (const appEntry of registeredApps) {
     const installPath = normalizeInstallPath(appEntry.installLocation);
     if (!installPath || path.parse(installPath).root.toUpperCase() !== `${selectedDrive}\\`) continue;
-    const pathKey = installPath.toLowerCase();
-    if (seenPaths.has(pathKey)) continue;
-    seenPaths.add(pathKey);
-    uniqueApps.push({ name: safeText(appEntry.name) || path.basename(installPath), publisher: safeText(appEntry.publisher), installPath });
+    appsByPath.set(installPath.toLowerCase(), { name: safeText(appEntry.name) || path.basename(installPath), publisher: safeText(appEntry.publisher) });
   }
 
-  const apps = [];
-  for (const appEntry of uniqueApps) {
-    let stats;
-    try { stats = await fs.stat(appEntry.installPath); } catch { continue; }
-    if (!stats.isDirectory()) continue;
-    const sizeBytes = await directorySizeBytes(appEntry.installPath);
-    if (sizeBytes > STORAGE_APP_MIN_BYTES) apps.push({ ...appEntry, sizeBytes });
+  const driveRoot = `${selectedDrive}\\`;
+  try {
+    const stats = await fs.stat(driveRoot);
+    if (!stats.isDirectory()) throw new Error('not a directory');
+  } catch {
+    return { supported: true, apps: [], error: 'Não foi possível acessar esta unidade.' };
   }
+
+  const { reported } = await walkFolderSizes(driveRoot, 0, STORAGE_APP_MIN_BYTES);
+  const apps = reported.map(item => {
+    const known = appsByPath.get(item.installPath.toLowerCase());
+    return known
+      ? { kind: 'app', name: known.name, publisher: known.publisher, installPath: item.installPath, sizeBytes: item.sizeBytes }
+      : { kind: 'folder', name: path.basename(item.installPath) || item.installPath, publisher: null, installPath: item.installPath, sizeBytes: item.sizeBytes };
+  });
   apps.sort((a, b) => b.sizeBytes - a.sizeBytes || a.name.localeCompare(b.name, 'pt-BR'));
-  return { supported: true, drive: selectedDrive, scannedApps: uniqueApps.length, apps };
+  return { supported: true, drive: selectedDrive, registeredApps: appsByPath.size, apps };
 }
 
 // ---------- tela Desempenho: leitura local ao vivo ----------

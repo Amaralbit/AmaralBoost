@@ -118,6 +118,7 @@
 .storage-row:last-child{border-bottom:0}
 .storage-app-icon{width:36px;height:36px;flex:0 0 auto;display:grid;place-items:center;border-radius:10px;background:#2b2849;color:#b5a5ff}
 .storage-app-icon svg{width:19px;height:19px}
+.storage-app-icon--folder{background:#233827;color:#8fd8a0}
 .storage-app-info{min-width:0;flex:1}
 .storage-app-name{display:block;font-size:13px;color:#e7edf3}
 .storage-app-path{display:block;margin-top:5px;color:#8498aa;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

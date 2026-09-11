@@ -309,6 +309,10 @@ function storageIcon() {
   return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><ellipse cx="12" cy="5.5" rx="7.5" ry="2.5"/><path d="M4.5 5.5v6c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-6"/><path d="M4.5 11.5v6c0 1.4 3.4 2.5 7.5 2.5s7.5-1.1 7.5-2.5v-6"/></svg>';
 }
 
+function storageFolderIcon() {
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.2h8A1.5 1.5 0 0 1 20.5 8.7v9.3A1.5 1.5 0 0 1 19 19.5H5A1.5 1.5 0 0 1 3.5 18V6.5Z"/></svg>';
+}
+
 function resetStorageResults(message) {
   document.querySelector('#storage-list').innerHTML = `<p class="startup-empty">${message}</p>`;
 }
@@ -363,7 +367,7 @@ function updateSelectedStorageDrive() {
   if (!selected) return;
   document.querySelector('#storage-drive-detail').textContent = `${selected.label} · ${formatStorageSize(selected.freeBytes)} livres de ${formatStorageSize(selected.totalBytes)}.`;
   document.querySelector('#storage-status').textContent = 'Pronto para verificar';
-  resetStorageResults('Clique em “Verificar armazenamento” para procurar apps maiores que 10 GB nesta unidade.');
+  resetStorageResults('Clique em “Verificar armazenamento” para procurar apps e pastas maiores que 10 GB nesta unidade.');
 }
 
 function renderStorageApps(result) {
@@ -381,18 +385,19 @@ function renderStorageApps(result) {
     return;
   }
   const apps = result.apps || [];
-  status.textContent = apps.length ? `${apps.length} app(s) acima de 10 GB` : 'Nenhum app acima de 10 GB';
+  status.textContent = apps.length ? `${apps.length} item(ns) acima de 10 GB` : 'Nada acima de 10 GB';
   if (!apps.length) {
-    resetStorageResults(`Foram verificadas ${result.scannedApps || 0} instalação(ões) registradas em ${result.drive}. Nenhuma passou de 10 GB.`);
+    resetStorageResults(`Toda a unidade ${result.drive} foi verificada. Nenhum app ou pasta passou de 10 GB.`);
     return;
   }
   apps.forEach(app => {
+    const isFolder = app.kind === 'folder';
     const row = document.createElement('article'); row.className = 'storage-row';
-    const icon = document.createElement('span'); icon.className = 'storage-app-icon'; icon.innerHTML = storageIcon();
+    const icon = document.createElement('span'); icon.className = `storage-app-icon${isFolder ? ' storage-app-icon--folder' : ''}`; icon.innerHTML = isFolder ? storageFolderIcon() : storageIcon();
     const info = document.createElement('div'); info.className = 'storage-app-info';
     const name = document.createElement('strong'); name.className = 'storage-app-name'; name.textContent = app.name;
     const installPath = document.createElement('span'); installPath.className = 'storage-app-path'; installPath.textContent = app.installPath;
-    const publisher = document.createElement('span'); publisher.className = 'storage-app-publisher'; publisher.textContent = app.publisher || 'Fornecedor não informado';
+    const publisher = document.createElement('span'); publisher.className = 'storage-app-publisher'; publisher.textContent = isFolder ? 'Pasta' : (app.publisher || 'Fornecedor não informado');
     const size = document.createElement('strong'); size.className = 'storage-app-size'; size.textContent = formatStorageSize(app.sizeBytes);
     info.append(name, installPath, publisher);
     row.append(icon, info, size);
@@ -408,14 +413,14 @@ async function scanStorageApps() {
   const status = document.querySelector('#storage-status');
   const select = document.querySelector('#storage-drive');
   const scanButton = document.querySelector('#storage-scan');
-  status.textContent = `Verificando instalações em ${drive}…`;
+  status.textContent = `Verificando ${drive}…`;
   select.disabled = true; scanButton.disabled = true; scanButton.textContent = 'Verificando…';
-  resetStorageResults('A leitura pode levar alguns instantes em unidades com muitos apps.');
+  resetStorageResults('A verificação percorre a unidade inteira, então pode levar alguns minutos em unidades grandes ou cheias.');
   try {
     renderStorageApps(await window.amaralBoost.scanStorageApps(drive));
   } catch {
     status.textContent = 'Não foi possível concluir a verificação';
-    resetStorageResults('Não foi possível analisar as instalações nesta unidade.');
+    resetStorageResults('Não foi possível analisar esta unidade.');
   } finally {
     storage.scanning = false;
     select.disabled = false; scanButton.disabled = false; scanButton.textContent = 'Verificar armazenamento';
