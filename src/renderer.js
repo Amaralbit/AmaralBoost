@@ -3,7 +3,7 @@ const profiles = {
   Equilibrado: { description: 'Ativa o plano Equilibrado do Windows e retorna o Game Mode ao estado original salvo.', effects: ['Plano de energia: ativar Equilibrado.', 'Game Mode: restaurar o estado original salvo.'] },
   Gamer: { description: 'Ativa Alto desempenho, liga o Game Mode e aplica um pacote de ajustes individuais de baixo risco voltado a jogos. Tudo revertível pelo Padrão Windows.', effects: ['Plano de energia: ativar Alto desempenho.', 'Game Mode: ativar para o usuário atual.'] },
   'Economia de Bateria': { description: 'Ativa o plano Economia de energia, desliga o Game Mode e aplica um pacote de ajustes individuais que reduzem trabalho em segundo plano. Tudo revertível pelo Padrão Windows.', effects: ['Plano de energia: ativar Economia de energia.', 'Game Mode: desativar para o usuário atual.'] },
-  'Padrão Windows': { description: 'Restaura exatamente o plano de energia e o Game Mode que estavam ativos antes da primeira aplicação do Amaral Boost.', effects: ['Restauração: usa somente o snapshot local pré-Amaral.', 'Se não houver snapshot, nenhuma configuração será alterada.'] }
+  'Padrão Windows': { description: 'Restaura exatamente o plano de energia e o Game Mode que estavam ativos antes da primeira aplicação do Amaral Boost.', effects: ['Restauração: usa somente o snapshot local pré-Amaral.', 'Se não houver snapshot, nenhuma configuração será alterada.', 'Ajustes individuais e placa de vídeo por jogo: desfaz o que o Amaral Boost mudou.'] }
 };
 
 // os pacotes do Gamer e da Economia de Bateria vêm do catálogo (fonte única de
@@ -35,11 +35,12 @@ function showToast(message) { toast.textContent = message; toast.classList.add('
 function switchView(view) {
   document.querySelectorAll('.view').forEach(element => element.classList.toggle('active-view', element.id === view));
   document.querySelectorAll('.nav-item').forEach(element => element.classList.toggle('active', element.dataset.view === view));
-  document.querySelector('#page-title').textContent = { dashboard: 'Visão geral', performance: 'Desempenho', profiles: 'Perfis', cleanups: 'Limpeza', ram: 'Gerenciamento de RAM', storage: 'Armazenamento', startup: 'Inicialização', history: 'Atividade', updates: 'Atualizações', donate: 'Doação', settings: 'Preferências' }[view];
+  document.querySelector('#page-title').textContent = { dashboard: 'Visão geral', performance: 'Desempenho', profiles: 'Perfis', games: 'Jogos', cleanups: 'Limpeza', ram: 'Gerenciamento de RAM', storage: 'Armazenamento', startup: 'Inicialização', history: 'Atividade', updates: 'Atualizações', donate: 'Doação', settings: 'Preferências' }[view];
   if (view === 'performance') startPerformancePolling(); else stopPerformancePolling();
   if (view === 'ram') startRamPolling(); else stopRamPolling();
   if (view === 'storage') loadStorageDrives();
   if (view === 'startup') loadStartupApps();
+  if (view === 'games') loadGamesView();
   // A checagem em si já roda sozinha ao abrir o app (ver bootstrap no fim do
   // arquivo); aqui só apaga a bolinha de aviso, porque o usuário acabou de ver.
   if (view === 'updates') document.querySelector('#updates-nav-dot').hidden = true;
@@ -222,6 +223,173 @@ async function pollRamOnce() {
 
 function startRamPolling() { if (ram.active) return; ram.active = true; pollRamOnce(); }
 function stopRamPolling() { ram.active = false; clearTimeout(ram.timerId); ram.timerId = null; }
+
+// ---------- Jogos: diagnóstico de Isolamento de núcleo + placa de vídeo por jogo ----------
+const games = { loading: false, list: [], hybrid: true };
+
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+// Só leitura: explica o estado e o custo, e abre a página do Windows. Nunca
+// liga ou desliga nada — é recurso de segurança, e a decisão é da pessoa.
+function renderCoreIsolation(status) {
+  const card = document.querySelector('#core-isolation-card');
+  const label = document.querySelector('#core-isolation-status');
+  card.replaceChildren();
+  if (!status?.supported || !status.available) {
+    label.textContent = status?.supported ? 'Não disponível neste Windows' : 'Disponível somente no Windows';
+    card.append(el('p', 'startup-empty', 'O Windows não informou o estado da segurança baseada em virtualização neste computador.'));
+    return;
+  }
+
+  let tone; let title; let summary;
+  if (status.hvciPendingReboot) {
+    tone = 'pending'; title = 'Integridade de Memória: desligada, falta reiniciar';
+    summary = 'Ela foi desligada nas configurações, mas continua ativa até o computador reiniciar.';
+  } else if (status.hvciRunning) {
+    tone = 'on'; title = 'Integridade de Memória: ligada';
+    summary = 'É o maior custo de desempenho em jogos que ainda sobra neste computador, e o Amaral Boost não mexe nele. Leia o que você ganha e o que perde antes de decidir.';
+  } else if (status.vbsStatus === 2) {
+    tone = 'partial'; title = 'Integridade de Memória: desligada · virtualização ainda ativa';
+    summary = 'A Integridade de Memória está desligada, mas a segurança baseada em virtualização continua rodando, com um custo menor.';
+  } else {
+    tone = 'off'; title = 'Integridade de Memória: desligada';
+    summary = 'Não há custo de desempenho vindo daqui neste computador.';
+  }
+  label.textContent = tone === 'on' ? 'Ligada' : tone === 'off' ? 'Desligada' : 'Atenção';
+
+  const head = el('div', 'core-head');
+  head.append(el('span', `core-dot core-dot--${tone}`), el('strong', 'core-title', title));
+  const points = el('ul', 'core-points');
+  const addPoint = (heading, text) => { const li = el('li'); li.append(el('b', '', heading), document.createTextNode(text)); points.append(li); };
+  if (tone === 'on' || tone === 'pending') {
+    addPoint('O que ela faz: ', 'isola o núcleo do Windows com virtualização e impede que drivers adulterados ou maliciosos executem código ali. É uma proteção real.');
+    addPoint('O que custa: ', 'jogos que dependem muito do processador podem perder alguns por cento de FPS, às vezes mais de 10%. A própria Microsoft cita desligá-la temporariamente como opção para quem prioriza desempenho em jogos.');
+    addPoint('Antes de desligar: ', 'é preciso reiniciar, e alguns anti-cheats, VPNs corporativas e softwares de trabalho pedem que ela fique ligada. Dá para religar pelo mesmo lugar a qualquer momento.');
+  }
+  if (status.hypervisorPresent) {
+    addPoint('Hipervisor ativo: ', 'mesmo com a Integridade de Memória desligada, a virtualização continua ligada enquanto Hyper-V, WSL 2, Área Restrita do Windows ou a Plataforma de Máquina Virtual estiverem ativados.');
+  }
+  if (status.credentialGuardRunning) {
+    addPoint('Credential Guard ligado: ', 'geralmente é exigido por empresa. Se o computador é do trabalho, fale com o suporte antes de mudar qualquer coisa aqui.');
+  }
+
+  const actions = el('div', 'core-actions');
+  const open = el('button', 'secondary-button', 'Abrir Isolamento de núcleo');
+  open.type = 'button';
+  open.addEventListener('click', async () => {
+    const result = await window.amaralBoost.openCoreIsolation();
+    if (!result?.ok) showToast(result?.message || 'Não foi possível abrir a Segurança do Windows.');
+  });
+  actions.append(open, el('span', 'muted', 'Segurança do Windows > Segurança do dispositivo'));
+  card.append(head, el('p', 'core-summary', summary));
+  if (points.childElementCount) card.append(points);
+  card.append(actions);
+}
+
+function gameIcon() {
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 8.5h10a4 4 0 0 1 4 4.6l-.6 3a2.6 2.6 0 0 1-4.4 1.4L14 15.5h-4l-2 2a2.6 2.6 0 0 1-4.4-1.4l-.6-3a4 4 0 0 1 4-4.6Z"/><path d="M8.3 11v3M6.8 12.5h3"/></svg>';
+}
+
+function renderGames(data) {
+  const list = document.querySelector('#games-list');
+  const status = document.querySelector('#games-status');
+  list.replaceChildren();
+  if (!data?.supported) {
+    status.textContent = 'Disponível somente no Windows';
+    list.append(el('p', 'startup-empty', 'A preferência de placa de vídeo por jogo está disponível somente no Windows.'));
+    return;
+  }
+  games.list = data.games || [];
+  games.hybrid = Boolean(data.hybrid);
+  const highCount = games.list.filter(game => game.preference === 'high').length;
+  status.textContent = games.list.length ? `${highCount} de ${games.list.length} na placa de alto desempenho` : 'Nenhum jogo encontrado';
+
+  if (!games.hybrid) {
+    const note = el('p', 'games-note', `Este computador tem só uma placa de vídeo${data.gpus?.[0] ? ` (${data.gpus[0]})` : ''}, então essa preferência não muda nada aqui. O que já estiver ligado ainda pode ser desligado.`);
+    list.append(note);
+  }
+  if (!games.list.length) {
+    list.append(el('p', 'startup-empty', 'Nenhum jogo da Steam ou da Epic Games foi encontrado. Use "Adicionar jogo" e escolha o executável.'));
+    return;
+  }
+
+  games.list.forEach(game => {
+    const row = el('article', 'startup-row');
+    const icon = el('span', 'startup-app-icon'); icon.innerHTML = gameIcon();
+    const info = el('div', 'startup-app-info');
+    const name = el('strong', 'startup-app-name', game.name);
+    const exe = el('span', 'startup-app-meta', game.exePath); exe.title = game.exePath;
+    const meta = el('span', 'startup-app-location', game.source);
+    if (!game.exists) meta.textContent += ' · executável não encontrado (o jogo pode ter sido desinstalado)';
+    else if (game.preference === 'saving') meta.textContent += ' · hoje em Economia de energia, definido no Windows';
+    info.append(name, exe, meta);
+
+    const side = el('div', 'game-side');
+    if (game.manual) {
+      const remove = el('button', 'text-button', 'Remover');
+      remove.type = 'button';
+      remove.addEventListener('click', () => removeGame(game));
+      side.append(remove);
+    }
+    const on = game.preference === 'high';
+    const label = el('label', 'switch'); label.title = on ? 'Voltar ao que era antes' : 'Usar a placa de alto desempenho';
+    const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.checked = on;
+    toggle.setAttribute('aria-label', `${on ? 'Desfazer placa de alto desempenho em' : 'Usar placa de alto desempenho em'} ${game.name}`);
+    // Ligar exige o executável existir e haver duas placas; desligar é sempre permitido.
+    toggle.disabled = !on && (!game.exists || !games.hybrid);
+    label.append(toggle, el('span'));
+    toggle.addEventListener('change', () => setGamePreference(game, toggle, label));
+    side.append(label);
+
+    row.append(icon, info, side);
+    list.append(row);
+  });
+}
+
+async function loadGamesView() {
+  if (games.loading || !window.amaralBoost?.listGames) return;
+  games.loading = true;
+  document.querySelector('#games-status').textContent = 'Lendo…';
+  const [core, list] = await Promise.allSettled([window.amaralBoost.getCoreIsolation(), window.amaralBoost.listGames()]);
+  if (core.status === 'fulfilled') renderCoreIsolation(core.value);
+  else { document.querySelector('#core-isolation-status').textContent = 'Não foi possível ler'; document.querySelector('#core-isolation-card').replaceChildren(el('p', 'startup-empty', 'Não foi possível ler o estado do Isolamento de núcleo agora.')); }
+  if (list.status === 'fulfilled') renderGames(list.value);
+  else { document.querySelector('#games-status').textContent = 'Não foi possível ler'; document.querySelector('#games-list').replaceChildren(el('p', 'startup-empty', 'Não foi possível procurar os jogos agora.')); }
+  games.loading = false;
+}
+
+async function setGamePreference(game, toggle, label) {
+  const enabled = toggle.checked;
+  toggle.disabled = true;
+  label.title = 'Aplicando…';
+  try {
+    const result = await window.amaralBoost.setGameGpuPreference(game.exePath, enabled);
+    if (result.historyEntry) { state.history.unshift(result.historyEntry); renderHistory(); }
+    if (!result.ok) throw new Error(result.message);
+    showToast(result.message);
+  } catch (error) {
+    showToast(error?.message || 'Não foi possível alterar a preferência deste jogo.');
+  }
+  await loadGamesView();
+}
+
+async function removeGame(game) {
+  const result = await window.amaralBoost.removeGame(game.exePath);
+  showToast(result?.message || 'Não foi possível remover.');
+  await loadGamesView();
+}
+
+document.querySelector('#games-add').addEventListener('click', async () => {
+  const result = await window.amaralBoost.addGame();
+  if (result?.canceled) return;
+  showToast(result?.message || 'Não foi possível adicionar o jogo.');
+  await loadGamesView();
+});
 
 // ---------- Inicialização: entradas do Registro e das pastas Inicializar ----------
 const startup = { loading: false, apps: [] };

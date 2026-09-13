@@ -8,6 +8,7 @@ const { promisify } = require('node:util');
 const { randomUUID } = require('node:crypto');
 const { TWEAKS, CLEANUPS, GAMER_BUNDLE, BATTERY_BUNDLE } = require('./tweaks');
 const ramLimit = require('./ram-limit');
+const gaming = require('./gaming');
 
 const execFileAsync = promisify(execFile);
 const REG_ABSENT = '__AMARAL_ABSENT__';
@@ -1296,7 +1297,9 @@ async function finalizeApplyResult(profile, results) {
 async function applyProfile(profile) {
   if (!PROFILE_NAMES.includes(profile)) throw new Error('Perfil inválido.');
   if (profile === 'Padrão Windows') {
-    const tweaksResults = await revertAllTweaks().catch(() => []);
+    // Preferências de placa de vídeo por jogo contam como "ajuste" para a
+    // promessa do Padrão Windows: tudo que o app mudou volta ao que era.
+    const tweaksResults = [...await revertAllTweaks().catch(() => []), ...await gaming.revertAll().catch(() => [])];
     const snapshot = await readSnapshot();
     if (!snapshot) {
       const noSnapshot = { setting: 'Restauração', status: 'failed', message: 'Não há snapshot pré-Amaral. Nenhuma configuração de perfil foi alterada.' };
@@ -1430,6 +1433,41 @@ async function checkForUpdates() {
 // Só permite abrir links https://github.com/... vindos da checagem de
 // atualização — evita virar um "abridor de qualquer URL" genérico exposto ao
 // renderer só porque esta tela precisa abrir um link.
+// ---------- aba Jogos ----------
+// URI fixa, nunca vinda do renderer: openExternalLink só aceita GitHub, e esta
+// é a única outra página que o app abre.
+async function openCoreIsolationSettings() {
+  try {
+    await shell.openExternal('windowsdefender://coreisolation/');
+    return { ok: true };
+  } catch {
+    return { ok: false, message: 'Não foi possível abrir a Segurança do Windows. Abra manualmente: Segurança do Windows > Segurança do dispositivo > Isolamento de núcleo.' };
+  }
+}
+
+async function setGameGpuPreference(exePath, enabled) {
+  let result;
+  try {
+    result = await gaming.setHighPerformance(exePath, enabled);
+  } catch (error) {
+    result = { ok: false, message: error?.message || 'Não foi possível alterar a preferência de placa de vídeo.' };
+  }
+  const name = typeof exePath === 'string' ? gaming.nameFromExe(exePath) : 'jogo';
+  const label = `${enabled ? 'Placa de alto desempenho' : 'Desfazer placa de alto desempenho'}: ${name}`;
+  const historyEntry = await recordTweakHistory('gpu-preference', label, result.ok, Boolean(result.unchanged), result.message);
+  return { ...result, historyEntry };
+}
+
+async function addGameFromDialog() {
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'Escolha o executável do jogo',
+    properties: ['openFile'],
+    filters: [{ name: 'Executável', extensions: ['exe'] }]
+  });
+  if (canceled || !filePaths?.[0]) return { ok: false, canceled: true };
+  return gaming.addManualGame(filePaths[0]);
+}
+
 async function openExternalLink(url) {
   try {
     const parsed = new URL(String(url));
@@ -1556,6 +1594,12 @@ app.whenReady().then(() => {
   ipcMain.handle('startup:set-enabled', (_event, item, enabled) => setStartupAppEnabled(item, enabled));
   ipcMain.handle('storage:get-drives', () => getStorageDrives());
   ipcMain.handle('storage:scan-apps', (_event, drive) => scanStorageApps(drive));
+  ipcMain.handle('gaming:get-core-isolation', () => gaming.getCoreIsolationStatus());
+  ipcMain.handle('gaming:open-core-isolation', () => openCoreIsolationSettings());
+  ipcMain.handle('gaming:list-games', () => gaming.listGames());
+  ipcMain.handle('gaming:set-gpu-preference', (_event, exePath, enabled) => setGameGpuPreference(exePath, enabled));
+  ipcMain.handle('gaming:add-game', () => addGameFromDialog());
+  ipcMain.handle('gaming:remove-game', (_event, exePath) => gaming.removeManualGame(exePath));
   ipcMain.handle('updates:check', () => checkForUpdates());
   ipcMain.handle('app:open-external', (_event, url) => openExternalLink(url));
   ipcMain.handle('app:copy-text', (_event, text) => { clipboard.writeText(String(text ?? '')); return { copied: true }; });

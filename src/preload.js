@@ -22,6 +22,12 @@ contextBridge.exposeInMainWorld('amaralBoost', {
   setStartupAppEnabled: (item, enabled) => ipcRenderer.invoke('startup:set-enabled', item, enabled),
   getStorageDrives: () => ipcRenderer.invoke('storage:get-drives'),
   scanStorageApps: drive => ipcRenderer.invoke('storage:scan-apps', drive),
+  getCoreIsolation: () => ipcRenderer.invoke('gaming:get-core-isolation'),
+  openCoreIsolation: () => ipcRenderer.invoke('gaming:open-core-isolation'),
+  listGames: () => ipcRenderer.invoke('gaming:list-games'),
+  setGameGpuPreference: (exePath, enabled) => ipcRenderer.invoke('gaming:set-gpu-preference', exePath, enabled),
+  addGame: () => ipcRenderer.invoke('gaming:add-game'),
+  removeGame: exePath => ipcRenderer.invoke('gaming:remove-game', exePath),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
   openExternal: url => ipcRenderer.invoke('app:open-external', url),
   copyText: text => ipcRenderer.invoke('app:copy-text', text)
