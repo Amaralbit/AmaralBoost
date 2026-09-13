@@ -276,7 +276,10 @@ async function listGames() {
   const prefByKey = new Map(prefs.filter(item => /\.exe$/i.test(item.name)).map(item => [exeKey(item.name), item]));
   const games = new Map();
 
-  function add(exePath, name, source) {
+  // installDir só existe para jogos de loja (Steam/Epic). O Modo durante o jogo
+  // reconhece esses pela pasta — assim funciona mesmo se a heurística escolheu o
+  // .exe errado; jogos manuais ou vindos do registro são reconhecidos pelo .exe.
+  function add(exePath, name, source, installDir = null) {
     const key = exeKey(exePath);
     if (games.has(key)) return;
     const pref = prefByKey.get(key);
@@ -284,6 +287,7 @@ async function listGames() {
       id: key,
       name,
       exePath: pref?.name || exePath,
+      installDir,
       source,
       preference: describePreference(readToken(pref?.value, 'GpuPreference')),
       managed: Boolean(state.applied[key]),
@@ -298,7 +302,7 @@ async function listGames() {
     // jogo, ele vale mais que a heurística.
     const chosen = [...prefByKey.keys()].find(key => key.startsWith(prefix));
     const exePath = chosen ? prefByKey.get(chosen).name : await findMainExecutable(game.installDir);
-    if (exePath) add(exePath, game.name, game.source);
+    if (exePath) add(exePath, game.name, game.source, game.installDir);
   }
   for (const exePath of state.manual) add(exePath, nameFromExe(exePath), 'Adicionado por você');
   for (const pref of prefByKey.values()) add(pref.name, nameFromExe(pref.name), 'Configurado no Windows');

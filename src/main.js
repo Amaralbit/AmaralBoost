@@ -9,6 +9,7 @@ const { randomUUID } = require('node:crypto');
 const { TWEAKS, CLEANUPS, GAMER_BUNDLE, BATTERY_BUNDLE } = require('./tweaks');
 const ramLimit = require('./ram-limit');
 const gaming = require('./gaming');
+const gameSession = require('./game-session');
 
 const execFileAsync = promisify(execFile);
 const REG_ABSENT = '__AMARAL_ABSENT__';
@@ -1421,7 +1422,7 @@ async function applyProfile(profile) {
   if (profile === 'Padrão Windows') {
     // Preferências de placa de vídeo por jogo contam como "ajuste" para a
     // promessa do Padrão Windows: tudo que o app mudou volta ao que era.
-    const tweaksResults = [...await revertAllTweaks().catch(() => []), ...await gaming.revertAll().catch(() => [])];
+    const tweaksResults = [...await revertAllTweaks().catch(() => []), ...await gaming.revertAll().catch(() => []), await turnOffGameSessionForResult()];
     const snapshot = await readSnapshot();
     if (!snapshot) {
       const noSnapshot = { setting: 'Restauração', status: 'failed', message: 'Não há snapshot pré-Amaral. Nenhuma configuração de perfil foi alterada.' };
@@ -1587,7 +1588,31 @@ async function addGameFromDialog() {
     filters: [{ name: 'Executável', extensions: ['exe'] }]
   });
   if (canceled || !filePaths?.[0]) return { ok: false, canceled: true };
-  return gaming.addManualGame(filePaths[0]);
+  const result = await gaming.addManualGame(filePaths[0]);
+  if (result.ok) await gameSession.refreshGames();
+  return result;
+}
+
+async function removeGame(exePath) {
+  const result = await gaming.removeManualGame(exePath);
+  if (result.ok) await gameSession.refreshGames();
+  return result;
+}
+
+async function setGameSessionEnabled(enabled) {
+  const result = await gameSession.setEnabled(enabled);
+  if (!result.unchanged) {
+    const label = enabled === true ? 'Ligar modo durante o jogo' : 'Desligar modo durante o jogo';
+    result.historyEntry = await recordTweakHistory('game-session', label, result.ok, false, result.message);
+  }
+  return { ...result, status: gameSession.getStatus() };
+}
+
+// O Padrão Windows promete "o app para de mexer": o modo, que age sozinho,
+// também é desligado (e ao desligar devolve o que estiver alterado).
+async function turnOffGameSessionForResult() {
+  const result = await gameSession.setEnabled(false).catch(error => ({ ok: false, message: error?.message || 'Falhou.' }));
+  return { setting: 'Modo durante o jogo', status: result.ok ? (result.unchanged ? 'unchanged' : 'success') : 'failed', message: result.unchanged ? 'Já estava desligado.' : result.message };
 }
 
 async function openExternalLink(url) {
@@ -1721,7 +1746,9 @@ app.whenReady().then(() => {
   ipcMain.handle('gaming:list-games', () => gaming.listGames());
   ipcMain.handle('gaming:set-gpu-preference', (_event, exePath, enabled) => setGameGpuPreference(exePath, enabled));
   ipcMain.handle('gaming:add-game', () => addGameFromDialog());
-  ipcMain.handle('gaming:remove-game', (_event, exePath) => gaming.removeManualGame(exePath));
+  ipcMain.handle('gaming:remove-game', (_event, exePath) => removeGame(exePath));
+  ipcMain.handle('game-session:get-status', () => gameSession.getStatus());
+  ipcMain.handle('game-session:set-enabled', (_event, enabled) => setGameSessionEnabled(enabled));
   ipcMain.handle('updates:check', () => checkForUpdates());
   ipcMain.handle('app:open-external', (_event, url) => openExternalLink(url));
   ipcMain.handle('app:copy-text', (_event, text) => { clipboard.writeText(String(text ?? '')); return { copied: true }; });
@@ -1732,6 +1759,7 @@ app.whenReady().then(() => {
   powerMonitor.on('on-ac', () => { reconcileOverlayForSource('ac').catch(() => {}); });
   powerMonitor.on('on-battery', () => { reconcileOverlayForSource('dc').catch(() => {}); });
   reconcileOverlayForCurrentSource().catch(() => {});
+  gameSession.init({ recordHistory: (label, ok, message) => recordTweakHistory('game-session', label, ok, false, message) }).catch(() => {});
   createWindow();
   createTray();
   app.on('activate', () => {
@@ -1740,3 +1768,13 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => { isQuitting = true; killPerfShell(); });
+
+// Fechar o app com o modo durante o jogo ativo: segura a saída até o auxiliar
+// devolver prioridade e EcoQoS (no máximo alguns segundos, ver STOP_TIMEOUT_MS).
+let gameSessionStoppedForQuit = false;
+app.on('before-quit', event => {
+  if (gameSessionStoppedForQuit || !gameSession.isRunning()) return;
+  event.preventDefault();
+  gameSessionStoppedForQuit = true;
+  gameSession.stop().finally(() => app.quit());
+});

@@ -136,6 +136,26 @@
         </section>
 
         <section id="games" class="view">
+          <div class="section-heading"><div><p class="eyebrow">AGE SOZINHO · TUDO VOLTA AO SAIR DO JOGO</p><h2>Modo durante o jogo</h2></div><span class="muted" id="game-session-status">Lendo…</span></div>
+          <article class="card game-session-card">
+            <div class="game-session-main">
+              <div>
+                <p class="game-session-lead">Enquanto um jogo da lista abaixo estiver <strong>em primeiro plano</strong>, o jogo ganha prioridade alta e apps de sincronização, launchers e extensões do navegador entram em modo de eficiência (EcoQoS). Alt-tab ou fechar o jogo devolve tudo como estava.</p>
+                <p class="game-session-live" id="game-session-live" aria-live="polite"></p>
+              </div>
+              <label class="switch" title="Ligar ou desligar o modo durante o jogo"><input type="checkbox" id="game-session-toggle" aria-label="Modo durante o jogo" disabled /><span></span></label>
+            </div>
+            <details class="game-session-details">
+              <summary>O que ele não toca, e por quê</summary>
+              <ul class="core-points">
+                <li><b>Abas, áudio e vídeo do navegador: </b>o próprio Chrome, Edge e Brave já põem as abas escondidas em modo de eficiência e marcam áudio e GPU como "não mexer". O modo só age em processos que ninguém gerencia, então música e lives no navegador não cortam.</li>
+                <li><b>Steam, Discord e Spotify: </b>o overlay da Steam roda no próprio cliente, e Discord e Spotify levam voz e áudio.</li>
+                <li><b>Núcleos do processador e memória: </b>limitar o jogo a certos núcleos pode piorar jogos que usam muitas threads, e esvaziar a memória dos outros apps com o jogo já carregando causa travadas.</li>
+                <li><b>Se o app fechar no meio: </b>o que foi alterado fica anotado e é desfeito na próxima vez que o Amaral Boost abrir.</li>
+              </ul>
+            </details>
+          </article>
+
           <div class="section-heading"><div><p class="eyebrow">DIAGNÓSTICO · SOMENTE LEITURA</p><h2>Isolamento de núcleo</h2></div><span class="muted" id="core-isolation-status">Lendo…</span></div>
           <article class="card core-isolation-card" id="core-isolation-card" aria-live="polite"><p class="startup-empty">Lendo o estado da segurança baseada em virtualização…</p></article>
 

@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('amaralBoost', {
   setGameGpuPreference: (exePath, enabled) => ipcRenderer.invoke('gaming:set-gpu-preference', exePath, enabled),
   addGame: () => ipcRenderer.invoke('gaming:add-game'),
   removeGame: exePath => ipcRenderer.invoke('gaming:remove-game', exePath),
+  getGameSessionStatus: () => ipcRenderer.invoke('game-session:get-status'),
+  setGameSessionEnabled: enabled => ipcRenderer.invoke('game-session:set-enabled', enabled),
   checkForUpdates: () => ipcRenderer.invoke('updates:check'),
   openExternal: url => ipcRenderer.invoke('app:open-external', url),
   copyText: text => ipcRenderer.invoke('app:copy-text', text)

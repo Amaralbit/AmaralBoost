@@ -40,7 +40,7 @@ function switchView(view) {
   if (view === 'ram') startRamPolling(); else stopRamPolling();
   if (view === 'storage') loadStorageDrives();
   if (view === 'startup') loadStartupApps();
-  if (view === 'games') loadGamesView();
+  if (view === 'games') { loadGamesView(); startGameSessionPolling(); } else stopGameSessionPolling();
   // A checagem em si já roda sozinha ao abrir o app (ver bootstrap no fim do
   // arquivo); aqui só apaga a bolinha de aviso, porque o usuário acabou de ver.
   if (view === 'updates') document.querySelector('#updates-nav-dot').hidden = true;
@@ -383,6 +383,70 @@ async function removeGame(game) {
   showToast(result?.message || 'Não foi possível remover.');
   await loadGamesView();
 }
+
+// ---------- Modo durante o jogo ----------
+const gameSessionUi = { timer: null, busy: false };
+
+function describeGameSession(status) {
+  if (!status?.supported) return { label: 'Disponível somente no Windows', live: '' };
+  if (status.error) return { label: 'Pausado', live: status.error };
+  if (!status.enabled) return { label: 'Desligado', live: '' };
+  if (!status.running || status.stale) return { label: 'Iniciando…', live: 'Preparando o monitor de jogos.' };
+  if (!status.inGame) return { label: 'Ligado', live: 'Aguardando um jogo da lista ficar em primeiro plano.' };
+  const priority = { high: 'prioridade alta no jogo', already: 'o jogo já estava em prioridade alta', denied: 'o jogo não permite mudar a prioridade (comum com anti-cheat)' }[status.priority] || 'prioridade do jogo inalterada';
+  const apps = status.throttled === 1 ? '1 processo de segundo plano em eficiência' : `${status.throttled} processos de segundo plano em eficiência`;
+  return { label: 'Em jogo', live: `Em jogo: ${status.game} · ${priority} · ${apps}.` };
+}
+
+function renderGameSession(status) {
+  const toggle = document.querySelector('#game-session-toggle');
+  const { label, live } = describeGameSession(status);
+  document.querySelector('#game-session-status').textContent = label;
+  const liveEl = document.querySelector('#game-session-live');
+  liveEl.textContent = live;
+  liveEl.classList.toggle('is-active', Boolean(status?.inGame));
+  if (!gameSessionUi.busy) {
+    toggle.checked = Boolean(status?.enabled);
+    toggle.disabled = !status?.supported;
+  }
+}
+
+async function refreshGameSession() {
+  if (!window.amaralBoost?.getGameSessionStatus) return;
+  try { renderGameSession(await window.amaralBoost.getGameSessionStatus()); } catch { /* próxima leitura tenta de novo */ }
+}
+
+function startGameSessionPolling() {
+  refreshGameSession();
+  clearInterval(gameSessionUi.timer);
+  gameSessionUi.timer = setInterval(refreshGameSession, 2000);
+}
+
+function stopGameSessionPolling() {
+  clearInterval(gameSessionUi.timer);
+  gameSessionUi.timer = null;
+}
+
+document.querySelector('#game-session-toggle').addEventListener('change', async event => {
+  const toggle = event.target;
+  const enabled = toggle.checked;
+  gameSessionUi.busy = true;
+  toggle.disabled = true;
+  try {
+    const result = await window.amaralBoost.setGameSessionEnabled(enabled);
+    if (result.historyEntry) { state.history.unshift(result.historyEntry); renderHistory(); }
+    showToast(result.message);
+    if (!result.ok) toggle.checked = !enabled;
+    gameSessionUi.busy = false;
+    renderGameSession(result.status);
+  } catch {
+    toggle.checked = !enabled;
+    showToast('Não foi possível alterar o modo durante o jogo.');
+  } finally {
+    gameSessionUi.busy = false;
+    toggle.disabled = false;
+  }
+});
 
 document.querySelector('#games-add').addEventListener('click', async () => {
   const result = await window.amaralBoost.addGame();
