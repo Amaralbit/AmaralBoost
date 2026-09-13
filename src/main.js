@@ -670,11 +670,127 @@ async function regRemove(hive, key, name) {
   await runPowerShellScript(`Remove-ItemProperty -Path '${p}' -Name '${n}' -ErrorAction SilentlyContinue`);
 }
 
-async function rollbackRegOps(backup) {
-  for (const op of backup) {
-    if (op.prev === REG_ABSENT) await regRemove(op.hive, op.key, op.name);
-    else await regSet(op.hive, op.key, op.name, op.type, op.type === 'DWord' ? parseInt(op.prev, 10) : op.prev);
+// ---------- tipos de operação do motor ----------
+// Um ajuste declara `regOps` (chaves de registro) e/ou `powerOps`
+// (subconfigurações do plano de energia, só na tomada). As duas passam pelo
+// mesmo ciclo: resolver a operação concreta, ler o valor atual, gravar e
+// guardar {...op, prev} no backup. `kind` diz como restaurar; backups gravados
+// antes de existir `kind` são todos de registro.
+//
+// Subconfiguração de energia pertence a UM plano. Por isso a operação concreta
+// carrega o GUID do plano ativo no momento da aplicação, e é nesse plano — não
+// no ativo na hora de reverter — que o valor original volta.
+const GUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const opKind = op => op.kind || 'reg';
+const powerOpKey = op => `${op.scheme}|${op.sub}|${op.setting}`.toLowerCase();
+
+async function resolveOps(tweak) {
+  const ops = (tweak.regOps || []).map(op => ({ kind: 'reg', ...op }));
+  if (tweak.powerOps?.length) {
+    const scheme = await readActivePowerPlan();
+    ops.push(...tweak.powerOps.map(op => ({ kind: 'power', scheme, sub: op.sub, setting: op.setting, value: op.value })));
   }
+  return ops;
+}
+
+// Lê pela API (PowerReadACValueIndex), não pelo texto do `powercfg /query`:
+// esse texto sai traduzido e no codepage OEM. Uma configuração que não existe
+// neste computador (ex.: Wi-Fi num desktop cabeado) volta como null.
+async function readPowerAcValues(ops) {
+  const values = new Map();
+  if (!ops.length) return values;
+  for (const op of ops) {
+    if (![op.scheme, op.sub, op.setting].every(guid => GUID_PATTERN.test(guid))) throw new Error('GUID de energia inválido.');
+  }
+  // `+= ,@(...)`: sem a vírgula, um único item de 3 GUIDs viraria 3 itens soltos.
+  const rows = ops.map(op => `$items += ,@('${op.scheme}','${op.sub}','${op.setting}')`).join('\n');
+  const script = `
+    Add-Type -Name PowerRead -Namespace AmaralBoost -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerReadACValueIndex(IntPtr root, ref Guid scheme, ref Guid sub, ref Guid setting, out uint value);'
+    $items = @()
+    ${rows}
+    $out = @(foreach ($i in $items) {
+      $g = [Guid]$i[0]; $s = [Guid]$i[1]; $t = [Guid]$i[2]; $v = [uint32]0
+      if ([AmaralBoost.PowerRead]::PowerReadACValueIndex([IntPtr]::Zero, [ref]$g, [ref]$s, [ref]$t, [ref]$v) -eq 0) { [string]$v } else { 'X' }
+    })
+    ConvertTo-Json -InputObject $out -Compress
+  `;
+  const out = JSON.parse(await runPowerShellScript(script));
+  ops.forEach((op, index) => values.set(powerOpKey(op), out[index] === 'X' || out[index] == null ? null : Number(out[index])));
+  return values;
+}
+
+async function writePowerAcValue(op, value) {
+  await runWindows('powercfg.exe', ['/setacvalueindex', op.scheme, op.sub, op.setting, String(Number(value) >>> 0)]);
+}
+
+// Mudança no plano ATIVO só vale depois de reativá-lo; em outro plano, vale
+// quando ele for ativado.
+async function reapplyActiveScheme(ops) {
+  const schemes = new Set(ops.filter(op => opKind(op) === 'power').map(op => op.scheme));
+  if (!schemes.size) return;
+  const active = await readActivePowerPlan().catch(() => null);
+  if (active && schemes.has(active)) await runWindows('powercfg.exe', ['/setactive', active]);
+}
+
+// Lê o valor atual de cada operação, grava todas e devolve o backup. Se uma
+// gravação falhar, restaura o que já tinha sido lido e lança o erro.
+async function applyOps(ops) {
+  const powerValues = await readPowerAcValues(ops.filter(op => op.kind === 'power'));
+  const backup = [];
+  let skipped = 0;
+  for (const op of ops) {
+    if (op.kind === 'power') {
+      const prev = powerValues.get(powerOpKey(op));
+      if (prev === null || prev === undefined) { skipped++; continue; }
+      backup.push({ ...op, prev });
+    } else {
+      backup.push({ ...op, prev: await regGet(op.hive, op.key, op.name) });
+    }
+  }
+  try {
+    for (const op of backup) {
+      if (op.kind === 'power') await writePowerAcValue(op, op.value);
+      else await regSet(op.hive, op.key, op.name, op.type, op.value);
+    }
+    await reapplyActiveScheme(backup);
+  } catch (error) {
+    await rollbackOps(backup).catch(() => {});
+    throw error;
+  }
+  return { backup, skipped };
+}
+
+async function rollbackOps(backup) {
+  const schemeExists = new Map();
+  const restoredPower = [];
+  for (const op of backup) {
+    if (opKind(op) === 'power') {
+      // Plano apagado depois da aplicação: não há onde restaurar, e não é erro.
+      if (!schemeExists.has(op.scheme)) schemeExists.set(op.scheme, await powerPlanExists(op.scheme));
+      if (!schemeExists.get(op.scheme)) continue;
+      await writePowerAcValue(op, op.prev);
+      restoredPower.push(op);
+    } else if (op.prev === REG_ABSENT) {
+      await regRemove(op.hive, op.key, op.name);
+    } else {
+      await regSet(op.hive, op.key, op.name, op.type, op.type === 'DWord' ? parseInt(op.prev, 10) : op.prev);
+    }
+  }
+  await reapplyActiveScheme(restoredPower);
+}
+
+const KNOWN_PLAN_LABELS = {
+  [BALANCED_PLAN_GUID]: 'Equilibrado',
+  [HIGH_PERFORMANCE_PLAN_GUID]: 'Alto desempenho',
+  [POWER_SAVER_PLAN_GUID]: 'Economia de energia',
+  'e9a42b02-d5df-448d-aa00-03f14749eb61': 'Desempenho Máximo'
+};
+
+function describeAppliedOps(backup, skipped) {
+  const schemes = [...new Set(backup.filter(op => opKind(op) === 'power').map(op => op.scheme))];
+  const where = schemes.length ? ` no plano ${schemes.map(guid => KNOWN_PLAN_LABELS[guid] || 'de energia ativo').join(', ')}` : '';
+  const skippedNote = skipped ? ` ${skipped === 1 ? '1 configuração não existe' : `${skipped} configurações não existem`} neste computador e ${skipped === 1 ? 'foi pulada' : 'foram puladas'}.` : '';
+  return { where, skippedNote };
 }
 
 async function isAdmin() {
@@ -731,27 +847,33 @@ async function refreshNote(tweak) {
 }
 
 const sameRegOp = (a, b) => a.hive === b.hive && a.key.toLowerCase() === b.key.toLowerCase() && a.name.toLowerCase() === b.name.toLowerCase();
+const sameOp = (a, b) => opKind(a) === opKind(b) && (opKind(a) === 'power' ? powerOpKey(a) === powerOpKey(b) : sameRegOp(a, b));
 
-// O catálogo evolui: um ajuste pode ganhar chaves novas numa versão futura.
-// Quem já tinha aplicado não pode ficar preso na lista antiga — o "Já estava
-// aplicado" pularia as chaves novas para sempre — e também não pode reaplicar
-// tudo: o backup das chaves antigas guardaria o valor JÁ alterado, e o Padrão
-// Windows perderia o original. Então só as chaves ausentes do backup são
-// lidas, gravadas e acrescentadas a ele.
+// Um ajuste já aplicado ainda pode ter operações pendentes, por dois motivos:
+// 1. o catálogo evoluiu e o ajuste ganhou chaves novas numa versão futura;
+// 2. o ajuste tem powerOps e o plano ativo agora é outro (o backup é por plano).
+// Reaplicar tudo seria errado — o backup do que já foi mudado guardaria o valor
+// JÁ alterado, e o Padrão Windows perderia o original. Então só as operações
+// ausentes do backup são lidas, gravadas e acrescentadas a ele.
 async function upgradeAppliedTweak(tweak, entry, state) {
-  const missing = tweak.regOps.filter(op => !entry.backup.some(prev => sameRegOp(prev, op)));
+  const missing = (await resolveOps(tweak)).filter(op => !entry.backup.some(prev => sameOp(prev, op)));
   if (!missing.length) return { ok: true, noop: true, message: 'Já estava aplicado.' };
-  const added = [];
-  for (const op of missing) added.push({ ...op, prev: await regGet(op.hive, op.key, op.name) });
+  let result;
   try {
-    for (const op of missing) await regSet(op.hive, op.key, op.name, op.type, op.value);
+    result = await applyOps(missing);
   } catch {
-    await rollbackRegOps(added).catch(() => {});
-    return { ok: false, message: 'Já estava aplicado, mas não foi possível gravar o que esta versão acrescentou (nada novo ficou alterado).' };
+    return { ok: false, message: 'Já estava aplicado, mas não foi possível gravar o que faltava (nada novo ficou alterado).' };
   }
-  entry.backup.push(...added);
+  // Tudo que faltava é configuração inexistente neste computador: nada mudou.
+  if (!result.backup.length) return { ok: true, noop: true, message: 'Já estava aplicado.' };
+  entry.backup.push(...result.backup);
   await writeTweaksState(state);
-  return { ok: true, message: `Atualizado com ${missing.length === 1 ? 'a chave nova' : `as ${missing.length} chaves novas`} desta versão.${await refreshNote(tweak)}` };
+  const newReg = result.backup.filter(op => opKind(op) === 'reg').length;
+  const { where, skippedNote } = describeAppliedOps(result.backup, result.skipped);
+  const parts = [];
+  if (newReg) parts.push(`Atualizado com ${newReg === 1 ? 'a chave nova' : `as ${newReg} chaves novas`} desta versão.`);
+  if (where) parts.push(`Aplicado também${where}.`);
+  return { ok: true, message: `${parts.join(' ')}${skippedNote}${await refreshNote(tweak)}` };
 }
 
 async function applyTweak(tweak) {
@@ -773,17 +895,17 @@ async function applyTweak(tweak) {
     await writeTweaksState(state);
     return { ok: true, message: result.message };
   }
-  const backup = [];
-  for (const op of tweak.regOps) backup.push({ ...op, prev: await regGet(op.hive, op.key, op.name) });
+  let result;
   try {
-    for (const op of tweak.regOps) await regSet(op.hive, op.key, op.name, op.type, op.value);
+    result = await applyOps(await resolveOps(tweak));
   } catch {
-    await rollbackRegOps(backup).catch(() => {});
     return { ok: false, message: 'Não foi possível aplicar o ajuste (nada ficou alterado).' };
   }
-  state.applied[tweak.id] = { appliedAt: new Date().toISOString(), backup };
+  if (!result.backup.length) return { ok: false, message: 'Nenhuma das configurações deste ajuste existe neste computador; nada foi alterado.' };
+  state.applied[tweak.id] = { appliedAt: new Date().toISOString(), backup: result.backup };
   await writeTweaksState(state);
-  return { ok: true, message: `Aplicado.${await refreshNote(tweak)}` };
+  const { where, skippedNote } = describeAppliedOps(result.backup, result.skipped);
+  return { ok: true, message: `Aplicado${where}.${skippedNote}${await refreshNote(tweak)}` };
 }
 
 async function revertTweakById(tweak) {
@@ -800,7 +922,7 @@ async function revertTweakById(tweak) {
     return { ok: true, message: result.message };
   }
   try {
-    await rollbackRegOps(entry.backup);
+    await rollbackOps(entry.backup);
   } catch {
     return { ok: false, message: 'Não foi possível restaurar. Tente novamente como administrador.' };
   }

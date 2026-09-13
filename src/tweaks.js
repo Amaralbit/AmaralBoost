@@ -6,6 +6,10 @@
  * guarda esse valor como backup e usa exatamente ele para reverter depois —
  * nunca "adivinha" um padrão do Windows.
  *
+ * `powerOps` é o equivalente para subconfigurações do plano de energia (valor
+ * da tomada): o motor guarda em qual plano cada valor foi mudado, e é nesse
+ * plano que ele volta — ver o comentário do ajuste 'power-plan-gaming'.
+ *
  * Um ajuste pode, em vez de `regOps`, declarar `native: '<tipo>'` quando a
  * mudança não é uma chave de registro que dê pra escrever. Hoje existe um tipo:
  * `power-overlay`, para o "Modo de Energia" do Windows 11 — ver o comentário
@@ -224,6 +228,38 @@ const TWEAKS = [
     admin: false,
     native: 'power-overlay',
     overlay: { source: 'dc', guid: OVERLAY_BETTER_BATTERY_GUID }
+  },
+  // `powerOps`: subconfigurações do plano de energia, só o valor da tomada (a
+  // bateria nunca é tocada). Valem para o plano ATIVO na hora de aplicar — no
+  // perfil Gamer, o plano que ele acabou de ativar. Medido numa máquina real:
+  // o plano Alto desempenho já traz ASPM, EPP e resfriamento assim, mas mantém
+  // a suspensão seletiva de USB ligada; e o Equilibrado (único plano em muitos
+  // notebooks com Modern Standby, onde o perfil não consegue trocar de plano)
+  // tem ASPM em economia máxima e EPP 45. É para esses casos que isto existe.
+  // Fora de propósito: processador mínimo em 100% (com EPP 0 a CPU já sobe na
+  // hora; forçar só esquenta o notebook parado), core parking (em CPU híbrida
+  // o Windows usa o parking junto do Thread Director — resultado inconsistente)
+  // e tempo para suspender/apagar a tela (não é desempenho, e jogos já pedem ao
+  // Windows para manter a tela ligada).
+  {
+    id: 'power-plan-gaming',
+    name: 'Plano de energia: sem economias que atrapalham jogos',
+    desc: 'Na tomada, desliga as economias que causam travadinhas e atraso — suspensão seletiva de USB (mouse, teclado e controle), gerenciamento de energia do PCI Express (placa de vídeo e SSD) e economia do Wi-Fi — e coloca o processador em preferência por desempenho e o resfriamento em ativo. Muda só o plano de energia ativo e nada na bateria.',
+    notWhen: 'você prefere o notebook mais frio e silencioso mesmo ligado na tomada.',
+    tags: ['gaming', 'desempenho'],
+    admin: false,
+    powerOps: [
+      // Suspensão seletiva de USB: 0 = desativada
+      { sub: '2a737441-1930-4402-8d77-b2bebba308a3', setting: '48e6b7a6-50f5-4782-a5d4-53bb8f07e226', value: 0 },
+      // PCI Express > Gerenciamento de energia do estado da conexão: 0 = desligado
+      { sub: '501a4d13-42af-4429-9fd1-a8218c268e20', setting: 'ee12f906-d277-404b-b6da-e5fa1a576df5', value: 0 },
+      // Adaptador sem fio > Modo de economia de energia: 0 = desempenho máximo
+      { sub: '19cbb8fa-5279-450e-9fac-8a3d5fedd0c1', setting: '12bbebe6-58d6-4636-95bb-3217ef867c1a', value: 0 },
+      // Processador > Preferência de desempenho energético (EPP): 0 = desempenho
+      { sub: '54533251-82be-4824-96c1-47b60b740d00', setting: '36687f9e-e3a5-4dbf-b1dc-15eb381c6863', value: 0 },
+      // Processador > Política de resfriamento do sistema: 1 = ativo
+      { sub: '54533251-82be-4824-96c1-47b60b740d00', setting: '94d3a615-a899-4ac5-ae2b-e4d8f634367f', value: 1 }
+    ]
   }
 ];
 
@@ -298,7 +334,7 @@ const CLEANUPS = [
  * pontual, de efeito conhecido e 100% revertível pelo Padrão Windows.
  */
 const GAMER_BUNDLE = {
-  tweaks: ['game-dvr-off', 'game-dvr-policy-off', 'mouse-acceleration-off', 'notifications-off', 'sticky-keys-off', 'network-throttling-off', 'games-priority', 'system-responsiveness', 'background-apps-off', 'edge-preload-off', 'visual-effects-performance', 'gamer-power-mode-max'],
+  tweaks: ['game-dvr-off', 'game-dvr-policy-off', 'mouse-acceleration-off', 'notifications-off', 'sticky-keys-off', 'network-throttling-off', 'games-priority', 'system-responsiveness', 'background-apps-off', 'edge-preload-off', 'visual-effects-performance', 'gamer-power-mode-max', 'power-plan-gaming'],
   cleanups: ['standby-list']
 };
 
