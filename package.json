@@ -1,6 +1,6 @@
 {
   "name": "amaral-boost",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Painel local e reversível para organizar ajustes de desempenho do Windows.",
   "main": "src/main.js",
   "author": "Amaral Boost",

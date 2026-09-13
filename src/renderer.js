@@ -480,7 +480,17 @@ function renderStartupApps(data) {
   }
   startup.apps.forEach(app => {
     const row = document.createElement('article'); row.className = 'startup-row';
-    const icon = document.createElement('span'); icon.className = 'startup-app-icon'; icon.innerHTML = startupIcon();
+    const icon = document.createElement('span'); icon.className = 'startup-app-icon';
+    if (/^data:image\/png;base64,/i.test(app.icon || '')) {
+      const image = document.createElement('img');
+      image.src = app.icon;
+      image.alt = '';
+      image.addEventListener('error', () => { icon.classList.remove('has-app-icon'); icon.innerHTML = startupIcon(); }, { once: true });
+      icon.classList.add('has-app-icon');
+      icon.append(image);
+    } else {
+      icon.innerHTML = startupIcon();
+    }
     const info = document.createElement('div'); info.className = 'startup-app-info';
     const name = document.createElement('strong'); name.className = 'startup-app-name'; name.textContent = app.name;
     const command = document.createElement('span'); command.className = 'startup-app-meta'; command.textContent = app.command;

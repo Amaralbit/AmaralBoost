@@ -98,6 +98,8 @@
 .startup-row:last-child{border-bottom:0}
 .startup-app-icon{width:34px;height:34px;flex:0 0 auto;display:grid;place-items:center;border-radius:10px;background:#20384d;color:#77c4ff}
 .startup-app-icon svg{width:18px;height:18px}
+.startup-app-icon.has-app-icon{background:#18232e;padding:4px}
+.startup-app-icon img{display:block;width:26px;height:26px;object-fit:contain}
 .startup-app-info{min-width:0;flex:1}
 .startup-app-name{display:block;font-size:13px;color:#e7edf3}
 .startup-app-meta{display:block;margin-top:5px;color:#8498aa;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

@@ -26,6 +26,7 @@ const GAME_MODE_PATH = 'HKCU:\\Software\\Microsoft\\GameBar';
 const GAME_MODE_VALUE = 'AutoGameModeEnabled';
 const MAX_HISTORY_ENTRIES = 200;
 const GITHUB_REPO = 'Amaralbit/AmaralBoost';
+const startupIconCache = new Map();
 let tray = null;
 let mainWindow = null;
 let isQuitting = false;
@@ -1047,6 +1048,62 @@ async function writeStartupFolderState(state) {
   await fs.writeFile(getStartupFolderStatePath(), JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 });
 }
 
+function expandWindowsEnvironmentVariables(value) {
+  const environment = new Map(Object.entries(process.env).map(([name, content]) => [name.toLowerCase(), content]));
+  return String(value || '').replace(/%([^%]+)%/g, (match, name) => environment.get(name.toLowerCase()) || match);
+}
+
+function executablePathFromStartupCommand(command) {
+  const expanded = expandWindowsEnvironmentVariables(command).trim();
+  if (!expanded) return null;
+  if (expanded.startsWith('"')) {
+    const closingQuote = expanded.indexOf('"', 1);
+    if (closingQuote > 1) return expanded.slice(1, closingQuote);
+  }
+  const executable = expanded.match(/^(.+?\.(?:exe|com|bat|cmd|lnk|url|ps1|msc|cpl))(?:\s|$)/i);
+  return (executable?.[1] || expanded.split(/\s+/, 1)[0]).replace(/^["']|["']$/g, '');
+}
+
+async function existingStartupIconPath(command) {
+  const candidate = executablePathFromStartupCommand(command);
+  if (!candidate) return null;
+  const paths = [];
+  if (path.isAbsolute(candidate)) {
+    paths.push(path.normalize(candidate));
+  } else {
+    const extensions = path.extname(candidate) ? [''] : String(process.env.PATHEXT || '.EXE;.COM;.BAT;.CMD').split(';');
+    for (const directory of String(process.env.PATH || '').split(path.delimiter).filter(Boolean)) {
+      for (const extension of extensions) paths.push(path.join(directory, `${candidate}${extension}`));
+    }
+  }
+  for (const candidatePath of paths) {
+    try {
+      await fs.access(candidatePath);
+      return candidatePath;
+    } catch { /* tenta o proximo caminho possivel */ }
+  }
+  return null;
+}
+
+async function startupIconDataUrl(command) {
+  const iconPath = await existingStartupIconPath(command);
+  if (!iconPath) return null;
+  const cacheKey = iconPath.toLowerCase();
+  if (!startupIconCache.has(cacheKey)) {
+    startupIconCache.set(cacheKey, app.getFileIcon(iconPath, { size: 'normal' })
+      .then(icon => icon.isEmpty() ? null : icon.toDataURL())
+      .catch(() => null));
+  }
+  return startupIconCache.get(cacheKey);
+}
+
+async function addStartupIcons(apps) {
+  return Promise.all(apps.map(async item => {
+    const { iconCommand, ...appInfo } = item;
+    return { ...appInfo, icon: await startupIconDataUrl(iconCommand || item.command) };
+  }));
+}
+
 async function getStartupApps() {
   if (process.platform !== 'win32') return { supported: false, apps: [] };
   const script = `
@@ -1084,7 +1141,7 @@ async function getStartupApps() {
     try {
       const entries = await fs.readdir(source.path, { withFileTypes: true });
       for (const entry of entries) {
-        if (!entry.isFile() || entry.name.endsWith(STARTUP_FOLDER_DISABLED_SUFFIX)) continue;
+        if (!entry.isFile() || entry.name.toLowerCase() === 'desktop.ini' || entry.name.endsWith(STARTUP_FOLDER_DISABLED_SUFFIX)) continue;
         folderApps.push({ kind: 'folder', source: source.source, name: entry.name, command: path.join(source.path, entry.name), location: source.location, enabled: true });
       }
     } catch (error) {
@@ -1092,16 +1149,17 @@ async function getStartupApps() {
     }
   }
   for (const disabled of folderState.disabled) {
+    if (String(disabled.originalName || '').toLowerCase() === 'desktop.ini') continue;
     const source = startupFolderSources().find(item => item.source === disabled.source);
     if (!source || !disabled.originalName || !disabled.disabledName) continue;
     try {
       await fs.access(path.join(source.path, disabled.disabledName));
-      folderApps.push({ kind: 'folder', source: source.source, name: disabled.originalName, command: path.join(source.path, disabled.originalName), location: source.location, enabled: false });
+      folderApps.push({ kind: 'folder', source: source.source, name: disabled.originalName, command: path.join(source.path, disabled.originalName), iconCommand: path.join(source.path, disabled.disabledName), location: source.location, enabled: false });
     } catch { /* o arquivo foi removido fora do app; não o exibe */ }
   }
 
   const apps = [...registryApps, ...folderApps].sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
-  return { supported: true, apps };
+  return { supported: true, apps: await addStartupIcons(apps) };
 }
 
 async function setStartupRegistryEnabled(item, enabled) {
