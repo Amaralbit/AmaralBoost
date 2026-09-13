@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, dialog, nativeImage, ipcMain, shell, clipboard } = require('electron');
+const { app, BrowserWindow, Tray, Menu, dialog, nativeImage, ipcMain, shell, clipboard, powerMonitor } = require('electron');
 const path = require('node:path');
 const os = require('node:os');
 const https = require('node:https');
@@ -14,14 +14,6 @@ const REG_ABSENT = '__AMARAL_ABSENT__';
 const BALANCED_PLAN_GUID = '381b4222-f694-41f0-9685-ff5bb260df2e';
 const HIGH_PERFORMANCE_PLAN_GUID = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c';
 const POWER_SAVER_PLAN_GUID = 'a1841308-3541-4fab-bc81-f71556f20b4a';
-// GUID do overlay "Economia de energia" do Modo de Energia do Windows 11 (o
-// seletor de Configurações > Energia e bateria, separado do plano de energia
-// clássico acima). Usado só para aplicar o ajuste 'battery-power-mode-eco' na
-// hora, sem esperar a próxima desconexão da tomada — ver applyBatteryOverlayNow.
-const OVERLAY_BETTER_BATTERY_GUID = '961cc777-2547-4f9d-8174-7d86181b8a7a';
-// Mesmo overlay, lado oposto: usado pelo perfil Gamer para forçar Desempenho
-// Máximo enquanto o notebook está na tomada (ver applyGamerOverlayNow).
-const OVERLAY_MAX_PERFORMANCE_GUID = 'ded574b5-45a0-4f42-8737-46345c09c238';
 const PROFILE_NAMES = ['Equilibrado', 'Gamer', 'Economia de Bateria', 'Padrão Windows'];
 const PROFILE_POWER_PLANS = {
   Equilibrado: { guid: BALANCED_PLAN_GUID, label: 'Equilibrado' },
@@ -705,12 +697,28 @@ function findCleanup(id) {
   return cleanup;
 }
 
+// Ajustes que não são chave de registro. Mesmo contrato do motor de regOps:
+// o handler devolve { ok, message, backup? } e o backup é o valor exato lido
+// antes da mudança, que é o que a reversão usa depois.
+const NATIVE_TWEAKS = {
+  'power-overlay': { apply: applyPowerOverlayTweak, revert: revertPowerOverlayTweak }
+};
+
 async function applyTweak(tweak) {
   if (tweak.admin && !(await isAdmin())) {
     return { ok: false, message: 'Este ajuste exige abrir o Amaral Boost como administrador.' };
   }
   const state = await readTweaksState();
   if (state.applied[tweak.id]) return { ok: true, noop: true, message: 'Já estava aplicado.' };
+  if (tweak.native) {
+    const handler = NATIVE_TWEAKS[tweak.native];
+    if (!handler) return { ok: false, message: 'Este ajuste não é suportado nesta versão do Amaral Boost.' };
+    const result = await handler.apply(tweak, state);
+    if (!result.ok) return result;
+    state.applied[tweak.id] = { appliedAt: new Date().toISOString(), native: tweak.native, backup: result.backup ?? null };
+    await writeTweaksState(state);
+    return { ok: true, message: result.message };
+  }
   const backup = [];
   for (const op of tweak.regOps) backup.push({ ...op, prev: await regGet(op.hive, op.key, op.name) });
   try {
@@ -728,6 +736,15 @@ async function revertTweakById(tweak) {
   const state = await readTweaksState();
   const entry = state.applied[tweak.id];
   if (!entry) return { ok: true, noop: true, message: 'Nada para reverter.' };
+  if (entry.native) {
+    const handler = NATIVE_TWEAKS[entry.native];
+    if (!handler) return { ok: false, message: 'Este ajuste não é suportado nesta versão do Amaral Boost.' };
+    const result = await handler.revert(tweak, entry, state);
+    if (!result.ok) return result;
+    delete state.applied[tweak.id];
+    await writeTweaksState(state);
+    return { ok: true, message: result.message };
+  }
   try {
     await rollbackRegOps(entry.backup);
   } catch {
@@ -1029,34 +1046,54 @@ async function readActivePowerPlan() {
   return guid;
 }
 
-async function listPowerPlans() {
-  const { stdout } = await runWindows('powercfg.exe', ['/list']);
-  return [...stdout.matchAll(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi)].map(match => match[0].toLowerCase());
-}
-
-async function activatePowerPlan(guid, label) {
-  const available = await listPowerPlans();
-  if (!available.includes(guid)) return { setting: 'Plano de energia', status: 'failed', message: `${label} não está disponível neste computador.` };
-  const current = await readActivePowerPlan();
-  if (current === guid) return { setting: 'Plano de energia', status: 'unchanged', message: `${label} já está ativo.` };
+// Existe de verdade neste computador? O registro é a fonte confiável: o
+// `powercfg /list` esconde planos (ver activatePowerPlan abaixo), o registro não.
+async function powerPlanExists(guid) {
+  const regPath = psQuote(`HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Power\\User\\PowerSchemes\\${guid}`);
   try {
-    await runWindows('powercfg.exe', ['/setactive', guid]);
-    const after = await readActivePowerPlan();
-    return after === guid
-      ? { setting: 'Plano de energia', status: 'success', message: `${label} foi ativado.` }
-      : { setting: 'Plano de energia', status: 'failed', message: 'O Windows não confirmou a alteração do plano.' };
+    return (await runPowerShellScript(`if (Test-Path '${regPath}') { 'sim' } else { 'nao' }`)).trim() === 'sim';
   } catch {
-    return { setting: 'Plano de energia', status: 'failed', message: `Não foi possível ativar ${label}.` };
+    return false;
   }
 }
 
-// Os ajustes 'battery-power-mode-eco' e 'gamer-power-mode-max' só gravam a
-// chave de registro que o Windows consulta na próxima troca de fonte de
-// energia (plugar/desplugar). Se a pessoa já está na fonte certa no momento
-// de aplicar o perfil, isso sozinho não muda nada na tela até trocar de
-// fonte — então, além de gravar a chave, chamamos a mesma função que o app
-// Configurações usa (PowerSetActiveOverlayScheme, de powrprof.dll) pra
-// refletir a troca imediatamente quando fizer sentido.
+// O Windows 11 esconde de `powercfg /list` os planos clássicos de desempenho
+// (Alto desempenho, Desempenho Máximo) desde que o "Modo de Energia" assumiu
+// esse papel — mas eles continuam existindo e o `/setactive` neles funciona
+// normalmente. Por isso o /list não pode ser porteiro: dava falso negativo, e o
+// perfil Gamer falhava com "Alto desempenho não está disponível" em máquinas
+// onde o plano existe e é ativável. A ordem certa é tentar ativar e confiar no
+// /getactivescheme, que é a única resposta confiável; o registro só é
+// consultado depois, se falhar, pra distinguir "este PC não tem esse plano" de
+// "o Windows recusou a troca".
+async function activatePowerPlan(guid, label) {
+  const current = await readActivePowerPlan().catch(() => null);
+  if (current === guid) return { setting: 'Plano de energia', status: 'unchanged', message: `${label} já está ativo.` };
+  try {
+    await runWindows('powercfg.exe', ['/setactive', guid]);
+    if ((await readActivePowerPlan().catch(() => null)) === guid) {
+      return { setting: 'Plano de energia', status: 'success', message: `${label} foi ativado.` };
+    }
+  } catch { /* cai no diagnóstico abaixo */ }
+  return {
+    setting: 'Plano de energia',
+    status: 'failed',
+    message: (await powerPlanExists(guid))
+      ? `O Windows não confirmou a ativação de ${label}.`
+      : `${label} não existe neste computador.`
+  };
+}
+
+// ---------- Modo de Energia do Windows 11 (overlay) ----------
+// Esse seletor (Configurações > Energia e bateria) NÃO é gravável por registro:
+// a chave que guarda a preferência por fonte de energia dá FullControl só para
+// SYSTEM — Administradores têm ReadKey, então nem o app elevado escreve ali.
+// A única via que funciona é PowerSetActiveOverlayScheme, de powrprof.dll, que
+// nem exige elevação — mas só atua sobre a fonte de energia ATIVA no momento.
+// Daí o desenho: o ajuste declara a fonte alvo ('ac' ou 'dc'), aplica na hora
+// se a máquina já estiver nela e, se não estiver, fica pendente;
+// reconcileOverlayForSource() aplica na próxima troca de fonte e na abertura do
+// app (é isso que substitui a persistência que a chave de registro daria).
 async function readPowerSource() {
   const script = `
     $b = Get-CimInstance -Namespace root\\wmi -ClassName BatteryStatus -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -1072,43 +1109,87 @@ async function readPowerSource() {
 async function setActiveOverlaySchemeNow(guid) {
   const script = `
     Add-Type -Name Overlay -Namespace AmaralBoost -MemberDefinition '[DllImport("powrprof.dll")] public static extern uint PowerSetActiveOverlayScheme(Guid overlayGuid);'
-    Write-Output ([AmaralBoost.Overlay]::PowerSetActiveOverlayScheme([Guid]'${guid}'))
+    Write-Output ([AmaralBoost.Overlay]::PowerSetActiveOverlayScheme([Guid]'${psQuote(guid)}'))
   `;
   const out = await runPowerShellScript(script, 8000);
   return out.trim() === '0';
 }
 
-// `acceptedSources` é a lista de valores de readPowerSource() que contam como
-// "aplicar agora". Um desktop sem bateria nunca reporta 'bateria', então o
-// lado tomada aceita também 'sem-bateria' — nesses PCs a máquina está sempre,
-// na prática, na fonte de energia.
-async function applyOverlaySchemeIfOnSource(acceptedSources, guid, messages) {
-  const source = await readPowerSource();
-  if (!acceptedSources.includes(source)) {
-    return { setting: 'Modo de Energia (Windows)', status: 'unchanged', message: messages.pending };
+// Escrever nessa chave é proibido para Administradores, mas LER é permitido —
+// é daqui que sai o valor de backup exato para o Padrão Windows restaurar.
+async function readOverlayGuidFor(source) {
+  const name = source === 'dc' ? 'ActiveOverlayDcPowerScheme' : 'ActiveOverlayAcPowerScheme';
+  const value = await regGet('HKLM', 'SYSTEM\\CurrentControlSet\\Control\\Power\\User\\PowerSchemes', name);
+  return value === REG_ABSENT ? null : String(value).trim().toLowerCase();
+}
+
+// Um desktop sem bateria nunca reporta 'bateria': na prática está sempre na
+// fonte de energia, então 'sem-bateria' conta como tomada.
+function sourceMatches(target, current) {
+  return target === 'dc' ? current === 'bateria' : (current === 'tomada' || current === 'sem-bateria');
+}
+
+const SOURCE_LABEL = { ac: 'na tomada', dc: 'na bateria' };
+
+async function applyPowerOverlayTweak(tweak) {
+  const { source, guid } = tweak.overlay;
+  const prev = await readOverlayGuidFor(source);
+  const backup = { source, prev };
+  if (!sourceMatches(source, await readPowerSource())) {
+    return { ok: true, backup, message: `Guardado para a próxima vez que o computador estiver ${SOURCE_LABEL[source]} — o Amaral Boost aplica sozinho na troca.` };
   }
   try {
-    const confirmed = await setActiveOverlaySchemeNow(guid);
-    return confirmed
-      ? { setting: 'Modo de Energia (Windows)', status: 'success', message: messages.applied }
-      : { setting: 'Modo de Energia (Windows)', status: 'failed', message: 'O Windows não confirmou a troca imediata do Modo de Energia.' };
+    if (!(await setActiveOverlaySchemeNow(guid))) return { ok: false, message: 'O Windows não confirmou a troca do Modo de Energia.' };
   } catch {
-    return { setting: 'Modo de Energia (Windows)', status: 'failed', message: 'Não foi possível trocar o Modo de Energia agora.' };
+    return { ok: false, message: 'Não foi possível trocar o Modo de Energia agora.' };
   }
+  return { ok: true, backup, message: `Aplicado agora (o computador está ${SOURCE_LABEL[source]}).` };
 }
 
-function applyBatteryOverlayNow() {
-  return applyOverlaySchemeIfOnSource(['bateria'], OVERLAY_BETTER_BATTERY_GUID, {
-    applied: 'Trocado agora para Economia de energia, porque o notebook está na bateria.',
-    pending: 'Definido para a próxima vez que o notebook estiver na bateria (agora está na tomada).'
-  });
+async function revertPowerOverlayTweak(tweak, entry, state) {
+  const source = entry.backup?.source || tweak.overlay.source;
+  const prev = entry.backup?.prev || null;
+  if (!prev) return { ok: true, message: 'Não havia Modo de Energia anterior guardado; nada foi alterado.' };
+  if (!sourceMatches(source, await readPowerSource())) {
+    // Não dá pra mexer no Modo de Energia da outra fonte agora: fica pendente e
+    // reconcileOverlayForSource() restaura na próxima troca.
+    state.pendingOverlay = { ...(state.pendingOverlay || {}), [source]: prev };
+    return { ok: true, message: `Será restaurado na próxima vez que o computador estiver ${SOURCE_LABEL[source]}.` };
+  }
+  try {
+    if (!(await setActiveOverlaySchemeNow(prev))) return { ok: false, message: 'O Windows não confirmou a restauração do Modo de Energia.' };
+  } catch {
+    return { ok: false, message: 'Não foi possível restaurar o Modo de Energia.' };
+  }
+  return { ok: true, message: 'Restaurado para o Modo de Energia anterior.' };
 }
 
-function applyGamerOverlayNow() {
-  return applyOverlaySchemeIfOnSource(['tomada', 'sem-bateria'], OVERLAY_MAX_PERFORMANCE_GUID, {
-    applied: 'Trocado agora para Desempenho Máximo.',
-    pending: 'Definido para a próxima vez que estiver na tomada (agora está na bateria).'
-  });
+// Chamado a cada troca de fonte de energia e na abertura do app. Uma restauração
+// pendente tem prioridade sobre um ajuste aplicado: quem reverteu mandou parar.
+async function reconcileOverlayForSource(source) {
+  // Trava obrigatória: PowerSetActiveOverlayScheme atua na fonte de energia
+  // ATIVA, não na que a gente pede. Chamar isso com a máquina na outra fonte
+  // gravaria a preferência errada — sobrescrevendo justamente a que o usuário
+  // configurou para a fonte oposta. O evento do powerMonitor já chega no
+  // momento certo, mas a garantia fica aqui, perto do efeito.
+  if (!sourceMatches(source, await readPowerSource())) return;
+  const state = await readTweaksState();
+  const pending = state.pendingOverlay?.[source] || null;
+  if (pending) {
+    if (await setActiveOverlaySchemeNow(pending).catch(() => false)) {
+      delete state.pendingOverlay[source];
+      await writeTweaksState(state);
+    }
+    return;
+  }
+  const tweak = TWEAKS.find(item => item.native === 'power-overlay' && item.overlay?.source === source && state.applied[item.id]);
+  if (tweak) await setActiveOverlaySchemeNow(tweak.overlay.guid).catch(() => false);
+}
+
+async function reconcileOverlayForCurrentSource() {
+  const current = await readPowerSource();
+  if (current === 'desconhecido') return;
+  await reconcileOverlayForSource(sourceMatches('dc', current) ? 'dc' : 'ac');
 }
 
 async function readGameMode() {
@@ -1201,7 +1282,6 @@ async function applyProfile(profile) {
     const results = [power, gameMode];
     for (const id of BATTERY_BUNDLE.tweaks) results.push(await applyTweakForResult(id));
     for (const id of BATTERY_BUNDLE.cleanups) results.push(await runCleanupForResult(id));
-    results.push(await applyBatteryOverlayNow());
     return finalizeApplyResult(profile, results);
   }
 
@@ -1212,7 +1292,6 @@ async function applyProfile(profile) {
   // "failed" na lista, sem impedir os demais — igual ao plano de energia hoje.
   for (const id of GAMER_BUNDLE.tweaks) results.push(await applyTweakForResult(id));
   for (const id of GAMER_BUNDLE.cleanups) results.push(await runCleanupForResult(id));
-  results.push(await applyGamerOverlayNow());
   return finalizeApplyResult(profile, results);
 }
 
@@ -1427,6 +1506,13 @@ app.whenReady().then(() => {
   ipcMain.handle('updates:check', () => checkForUpdates());
   ipcMain.handle('app:open-external', (_event, url) => openExternalLink(url));
   ipcMain.handle('app:copy-text', (_event, text) => { clipboard.writeText(String(text ?? '')); return { copied: true }; });
+  // O Modo de Energia por fonte (tomada/bateria) não pode ser gravado no
+  // registro — ver o bloco de overlay acima. Reaplicar aqui e a cada troca de
+  // fonte é o que faz os ajustes 'gamer-power-mode-max' e
+  // 'battery-power-mode-eco' continuarem valendo depois de reiniciar o Windows.
+  powerMonitor.on('on-ac', () => { reconcileOverlayForSource('ac').catch(() => {}); });
+  powerMonitor.on('on-battery', () => { reconcileOverlayForSource('dc').catch(() => {}); });
+  reconcileOverlayForCurrentSource().catch(() => {});
   createWindow();
   createTray();
   app.on('activate', () => {

@@ -6,6 +6,13 @@
  * guarda esse valor como backup e usa exatamente ele para reverter depois —
  * nunca "adivinha" um padrão do Windows.
  *
+ * Um ajuste pode, em vez de `regOps`, declarar `native: '<tipo>'` quando a
+ * mudança não é uma chave de registro que dê pra escrever. Hoje existe um tipo:
+ * `power-overlay`, para o "Modo de Energia" do Windows 11 — ver o comentário
+ * dos dois ajustes de Modo de Energia mais abaixo e applyPowerOverlayTweak em
+ * main.js. A disciplina é a mesma: ler o valor atual antes, guardar, reverter
+ * exatamente nele.
+ *
  * `admin: true` marca ajustes que só funcionam com o Amaral Boost aberto como
  * administrador (mudam HKLM, que é da máquina toda, não só do usuário atual).
  * `notWhen` explica em texto quando a pessoa pode preferir NÃO ativar o ajuste.
@@ -14,6 +21,11 @@
  * chave pontual, ou segurança. Cada um foi escolhido por ser revertível de
  * forma exata, com efeito simples de explicar.
  */
+
+// GUIDs dos "Modos de Energia" do Windows 11 (Configurações > Energia e
+// bateria) — o seletor que é separado do plano de energia clássico.
+const OVERLAY_MAX_PERFORMANCE_GUID = 'ded574b5-45a0-4f42-8737-46345c09c238';
+const OVERLAY_BETTER_BATTERY_GUID = '961cc777-2547-4f9d-8174-7d86181b8a7a';
 
 const TWEAKS = [
   {
@@ -147,16 +159,23 @@ const TWEAKS = [
       { hive: 'HKCU', key: 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\VisualEffects', name: 'VisualFXSetting', type: 'DWord', value: 2 }
     ]
   },
+  // Os dois ajustes de Modo de Energia abaixo já foram `regOps` gravando
+  // ActiveOverlayAcPowerScheme / ActiveOverlayDcPowerScheme em HKLM, e falhavam
+  // em 100% das aplicações: a ACL dessa chave dá FullControl só para SYSTEM —
+  // Administradores têm ReadKey. Nem elevado o app consegue escrever ali. O
+  // caminho que funciona é PowerSetActiveOverlayScheme (powrprof.dll), que nem
+  // exige elevação, mas só atua sobre a fonte de energia ATIVA no momento; por
+  // isso o ajuste guarda a fonte alvo e o Amaral Boost reaplica sozinho quando
+  // o notebook troca de tomada para bateria e vice-versa.
   {
     id: 'gamer-power-mode-max',
     name: 'Modo de Energia: desempenho máximo na tomada',
     desc: 'Ajusta o "Modo de Energia" do Windows (Configurações > Energia e bateria) para Desempenho Máximo enquanto o notebook está na tomada, sem mexer no modo usado na bateria.',
     notWhen: 'você prefere escolher manualmente o "Modo de Energia" em Configurações do Windows.',
     tags: ['gaming', 'desempenho'],
-    admin: true,
-    regOps: [
-      { hive: 'HKLM', key: 'SYSTEM\\CurrentControlSet\\Control\\Power\\User\\PowerSchemes', name: 'ActiveOverlayAcPowerScheme', type: 'String', value: 'ded574b5-45a0-4f42-8737-46345c09c238' }
-    ]
+    admin: false,
+    native: 'power-overlay',
+    overlay: { source: 'ac', guid: OVERLAY_MAX_PERFORMANCE_GUID }
   },
   {
     id: 'battery-power-mode-eco',
@@ -164,10 +183,9 @@ const TWEAKS = [
     desc: 'Ajusta o "Modo de Energia" do Windows (Configurações > Energia e bateria) para Economia de energia sempre que o notebook estiver na bateria, sem mexer no modo usado conectado na tomada.',
     notWhen: 'você prefere escolher manualmente o "Modo de Energia" em Configurações do Windows.',
     tags: ['bateria', 'desempenho'],
-    admin: true,
-    regOps: [
-      { hive: 'HKLM', key: 'SYSTEM\\CurrentControlSet\\Control\\Power\\User\\PowerSchemes', name: 'ActiveOverlayDcPowerScheme', type: 'String', value: '961cc777-2547-4f9d-8174-7d86181b8a7a' }
-    ]
+    admin: false,
+    native: 'power-overlay',
+    overlay: { source: 'dc', guid: OVERLAY_BETTER_BATTERY_GUID }
   }
 ];
 
