@@ -704,12 +704,65 @@ const NATIVE_TWEAKS = {
   'power-overlay': { apply: applyPowerOverlayTweak, revert: revertPowerOverlayTweak }
 };
 
+// Algumas mudanças de registro só valem no próximo login, a menos que o
+// Windows seja avisado. `refresh` no ajuste escolhe o aviso; roda depois de
+// aplicar, de atualizar e de reverter. Se o aviso falhar, o registro continua
+// certo — só a mensagem muda, dizendo que vale a partir do próximo login.
+const REFRESH_HOOKS = {
+  // SPI_SETMOUSE (0x0004) recebe [MouseThreshold1, MouseThreshold2, MouseSpeed];
+  // SPIF_SENDCHANGE (2) avisa os apps abertos sem regravar o registro.
+  mouse: async () => {
+    const script = `
+      $m = Get-ItemProperty -Path 'HKCU:\\Control Panel\\Mouse'
+      Add-Type -Name Mouse -Namespace AmaralBoost -MemberDefinition '[DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint param, int[] vparam, uint winIni);'
+      $v = [int[]]@([int]$m.MouseThreshold1, [int]$m.MouseThreshold2, [int]$m.MouseSpeed)
+      Write-Output ([AmaralBoost.Mouse]::SystemParametersInfo(4, 0, $v, 2))
+    `;
+    return (await runPowerShellScript(script, 8000)).trim().toLowerCase() === 'true';
+  }
+};
+
+async function refreshNote(tweak) {
+  const hook = tweak.refresh ? REFRESH_HOOKS[tweak.refresh] : null;
+  if (!hook) return '';
+  const ok = await hook().catch(() => false);
+  return ok ? '' : ' A mudança foi gravada, mas só vale a partir do próximo login.';
+}
+
+const sameRegOp = (a, b) => a.hive === b.hive && a.key.toLowerCase() === b.key.toLowerCase() && a.name.toLowerCase() === b.name.toLowerCase();
+
+// O catálogo evolui: um ajuste pode ganhar chaves novas numa versão futura.
+// Quem já tinha aplicado não pode ficar preso na lista antiga — o "Já estava
+// aplicado" pularia as chaves novas para sempre — e também não pode reaplicar
+// tudo: o backup das chaves antigas guardaria o valor JÁ alterado, e o Padrão
+// Windows perderia o original. Então só as chaves ausentes do backup são
+// lidas, gravadas e acrescentadas a ele.
+async function upgradeAppliedTweak(tweak, entry, state) {
+  const missing = tweak.regOps.filter(op => !entry.backup.some(prev => sameRegOp(prev, op)));
+  if (!missing.length) return { ok: true, noop: true, message: 'Já estava aplicado.' };
+  const added = [];
+  for (const op of missing) added.push({ ...op, prev: await regGet(op.hive, op.key, op.name) });
+  try {
+    for (const op of missing) await regSet(op.hive, op.key, op.name, op.type, op.value);
+  } catch {
+    await rollbackRegOps(added).catch(() => {});
+    return { ok: false, message: 'Já estava aplicado, mas não foi possível gravar o que esta versão acrescentou (nada novo ficou alterado).' };
+  }
+  entry.backup.push(...added);
+  await writeTweaksState(state);
+  return { ok: true, message: `Atualizado com ${missing.length === 1 ? 'a chave nova' : `as ${missing.length} chaves novas`} desta versão.${await refreshNote(tweak)}` };
+}
+
 async function applyTweak(tweak) {
   if (tweak.admin && !(await isAdmin())) {
     return { ok: false, message: 'Este ajuste exige abrir o Amaral Boost como administrador.' };
   }
   const state = await readTweaksState();
-  if (state.applied[tweak.id]) return { ok: true, noop: true, message: 'Já estava aplicado.' };
+  const entry = state.applied[tweak.id];
+  if (entry) {
+    if (tweak.native || !Array.isArray(entry.backup)) return { ok: true, noop: true, message: 'Já estava aplicado.' };
+    return upgradeAppliedTweak(tweak, entry, state);
+  }
   if (tweak.native) {
     const handler = NATIVE_TWEAKS[tweak.native];
     if (!handler) return { ok: false, message: 'Este ajuste não é suportado nesta versão do Amaral Boost.' };
@@ -729,7 +782,7 @@ async function applyTweak(tweak) {
   }
   state.applied[tweak.id] = { appliedAt: new Date().toISOString(), backup };
   await writeTweaksState(state);
-  return { ok: true, message: 'Aplicado.' };
+  return { ok: true, message: `Aplicado.${await refreshNote(tweak)}` };
 }
 
 async function revertTweakById(tweak) {
@@ -752,7 +805,7 @@ async function revertTweakById(tweak) {
   }
   delete state.applied[tweak.id];
   await writeTweaksState(state);
-  return { ok: true, message: 'Revertido para o estado original.' };
+  return { ok: true, message: `Revertido para o estado original.${await refreshNote(tweak)}` };
 }
 
 async function tweaksState() {

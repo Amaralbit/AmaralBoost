@@ -40,6 +40,39 @@ const TWEAKS = [
       { hive: 'HKCU', key: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\GameDVR', name: 'AppCaptureEnabled', type: 'DWord', value: 0 }
     ]
   },
+  // Separado de 'game-dvr-off' de propósito: aquele é HKCU e não exige
+  // administrador; misturar os dois num ajuste só faria um usuário sem
+  // elevação ficar com metade aplicada. A política de máquina é o que impede
+  // o Game Bar de religar a captura sozinho após update ou reset da conta.
+  {
+    id: 'game-dvr-policy-off',
+    name: 'Bloquear Game DVR por política do Windows',
+    desc: 'Grava a política de máquina que desliga a captura da Xbox Game Bar para todos os usuários, impedindo que ela volte a ligar sozinha depois de uma atualização. Configurações passa a mostrar esse item como "gerenciado pela organização".',
+    notWhen: 'você usa a Xbox Game Bar para gravar vídeos ou tirar capturas de tela dos jogos.',
+    tags: ['gaming'],
+    admin: true,
+    regOps: [
+      { hive: 'HKLM', key: 'SOFTWARE\\Policies\\Microsoft\\Windows\\GameDVR', name: 'AllowGameDVR', type: 'DWord', value: 0 }
+    ]
+  },
+  // Os três valores juntos são o que o "Aprimorar precisão do ponteiro" do
+  // Painel de Controle grava. O registro sozinho só vale no próximo login;
+  // `refresh: 'mouse'` faz o motor avisar o Windows na hora (SPI_SETMOUSE),
+  // tanto ao aplicar quanto ao reverter.
+  {
+    id: 'mouse-acceleration-off',
+    name: 'Desativar aceleração do mouse',
+    desc: 'Desliga o "Aprimorar precisão do ponteiro": o cursor passa a andar sempre a mesma distância para o mesmo movimento do mouse, independente da velocidade. Mira mais consistente em jogos de tiro.',
+    notWhen: 'você usa principalmente o touchpad do notebook e acha o ponteiro lento sem a aceleração.',
+    tags: ['gaming'],
+    admin: false,
+    refresh: 'mouse',
+    regOps: [
+      { hive: 'HKCU', key: 'Control Panel\\Mouse', name: 'MouseSpeed', type: 'String', value: '0' },
+      { hive: 'HKCU', key: 'Control Panel\\Mouse', name: 'MouseThreshold1', type: 'String', value: '0' },
+      { hive: 'HKCU', key: 'Control Panel\\Mouse', name: 'MouseThreshold2', type: 'String', value: '0' }
+    ]
+  },
   {
     id: 'sticky-keys-off',
     name: 'Desativar popups de Sticky Keys',
@@ -78,7 +111,7 @@ const TWEAKS = [
     name: 'Desativar notificações do Windows',
     desc: 'Impede os popups de notificação (toasts) de aparecerem no canto da tela. Cada toast acende a tela e acorda processos em segundo plano.',
     notWhen: 'você depende de lembretes de calendário, e-mail ou de outros apps por notificação.',
-    tags: ['geral', 'privacidade', 'bateria'],
+    tags: ['geral', 'privacidade', 'bateria', 'gaming'],
     admin: false,
     regOps: [
       { hive: 'HKCU', key: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\PushNotifications', name: 'ToastEnabled', type: 'DWord', value: 0 }
@@ -107,13 +140,18 @@ const TWEAKS = [
   {
     id: 'games-priority',
     name: 'Prioridade máxima para jogos',
-    desc: 'Ajusta o perfil "Jogos" do Windows: mais prioridade de GPU e CPU para a tarefa em primeiro plano.',
+    desc: 'Ajusta o perfil "Jogos" do Windows: mais prioridade de GPU, CPU e leitura de disco para a tarefa em primeiro plano.',
     tags: ['gaming'],
     admin: true,
+    // 'SFIO Priority' entrou depois (v0.3.7). Quem já tinha o ajuste aplicado
+    // recebe só esse valor novo — ver o caminho de atualização em applyTweak.
+    // Affinity, Background Only e Clock Rate ficam de fora: o padrão do Windows
+    // já é o valor que um ajuste gravaria (0, False, 10000).
     regOps: [
       { hive: 'HKLM', key: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games', name: 'GPU Priority', type: 'DWord', value: 8 },
       { hive: 'HKLM', key: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games', name: 'Priority', type: 'DWord', value: 6 },
-      { hive: 'HKLM', key: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games', name: 'Scheduling Category', type: 'String', value: 'High' }
+      { hive: 'HKLM', key: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games', name: 'Scheduling Category', type: 'String', value: 'High' },
+      { hive: 'HKLM', key: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Multimedia\\SystemProfile\\Tasks\\Games', name: 'SFIO Priority', type: 'String', value: 'High' }
     ]
   },
   {
@@ -260,7 +298,7 @@ const CLEANUPS = [
  * pontual, de efeito conhecido e 100% revertível pelo Padrão Windows.
  */
 const GAMER_BUNDLE = {
-  tweaks: ['game-dvr-off', 'sticky-keys-off', 'network-throttling-off', 'games-priority', 'system-responsiveness', 'background-apps-off', 'edge-preload-off', 'visual-effects-performance', 'gamer-power-mode-max'],
+  tweaks: ['game-dvr-off', 'game-dvr-policy-off', 'mouse-acceleration-off', 'notifications-off', 'sticky-keys-off', 'network-throttling-off', 'games-priority', 'system-responsiveness', 'background-apps-off', 'edge-preload-off', 'visual-effects-performance', 'gamer-power-mode-max'],
   cleanups: ['standby-list']
 };
 
